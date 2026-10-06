@@ -30,6 +30,7 @@ type Message = {
 
 export default function ChatsPage() {
   const router = useRouter()
+  const [searchQuery, setSearchQuery] = useState('')
 
   const [conversations, setConversations] =
     useState<Conversation[]>([])
@@ -98,215 +99,17 @@ export default function ChatsPage() {
 
     setCurrentUserId(user.id)
 
-    // ============================================
-    // LOAD MATCHES
-    // ============================================
+    // Fetch names, latest messages and unread counts together.
+    const { data, error: summaryError } = await supabase.rpc('brework_chat_summaries')
 
-    const {
-      data: matches,
-      error: matchesError,
-    } = await supabase
-      .from('matches')
-      .select(`
-        id,
-        user_1_id,
-        user_2_id,
-        status,
-        created_at
-      `)
-      .or(
-        `user_1_id.eq.${user.id},user_2_id.eq.${user.id}`
-      )
-      .eq('status', 'active')
-      .order('created_at', {
-        ascending: false,
-      })
-
-    if (matchesError) {
-      console.error(
-        'Could not load matches:',
-        matchesError
-      )
-
-      setError(
-        'Could not load your conversations.'
-      )
-
+    if (summaryError) {
+      console.error('Could not load conversations:', summaryError)
+      setError('Could not load your conversations. Please try again.')
       setLoading(false)
       return
     }
 
-    if (!matches || matches.length === 0) {
-      setConversations([])
-      setLoading(false)
-      return
-    }
-
-    // ============================================
-    // FIND OTHER USERS
-    // ============================================
-
-    const otherUserIds = matches.map((match) =>
-      match.user_1_id === user.id
-        ? match.user_2_id
-        : match.user_1_id
-    )
-
-    const uniqueOtherUserIds = [
-      ...new Set(otherUserIds),
-    ]
-
-    const {
-      data: profiles,
-      error: profilesError,
-    } = await supabase
-      .from('profiles')
-      .select(`
-        id,
-        first_name,
-        last_name
-      `)
-      .in(
-        'id',
-        uniqueOtherUserIds
-      )
-
-    if (profilesError) {
-      console.error(
-        'Could not load profiles:',
-        profilesError
-      )
-
-      setError(
-        'Could not load your conversations.'
-      )
-
-      setLoading(false)
-      return
-    }
-
-    // ============================================
-    // LOAD CONVERSATION DATA
-    // ============================================
-
-    const conversationResults =
-      await Promise.all(
-        matches.map(async (match) => {
-
-          // ======================================
-          // GET LATEST MESSAGE
-          // ======================================
-
-          const {
-            data: latestMessage,
-            error: latestMessageError,
-          } = await supabase
-            .from('messages')
-            .select(`
-              id,
-              match_id,
-              sender_id,
-              message,
-              created_at,
-              read_at
-            `)
-            .eq(
-              'match_id',
-              match.id
-            )
-            .order('created_at', {
-              ascending: false,
-            })
-            .limit(1)
-            .maybeSingle()
-
-          if (latestMessageError) {
-            console.error(
-              `Could not load latest message for match ${match.id}:`,
-              latestMessageError
-            )
-          }
-
-          // ======================================
-          // COUNT UNREAD MESSAGES
-          // ======================================
-
-          const {
-            count: unreadCount,
-            error: unreadError,
-          } = await supabase
-            .from('messages')
-            .select(
-              'id',
-              {
-                count: 'exact',
-                head: true,
-              }
-            )
-            .eq(
-              'match_id',
-              match.id
-            )
-            .neq(
-              'sender_id',
-              user.id
-            )
-            .is(
-              'read_at',
-              null
-            )
-
-          if (unreadError) {
-            console.error(
-              `Could not load unread count for match ${match.id}:`,
-              unreadError
-            )
-          }
-
-          // ======================================
-          // FIND OTHER USER
-          // ======================================
-
-          const otherUserId =
-            match.user_1_id === user.id
-              ? match.user_2_id
-              : match.user_1_id
-
-          const otherUser =
-            profiles?.find(
-              (profile) =>
-                profile.id ===
-                otherUserId
-            ) || null
-
-          return {
-            matchId: match.id,
-
-            otherUser,
-
-            latestMessage:
-              latestMessage?.message ||
-              null,
-
-            latestMessageTime:
-              latestMessage?.created_at ||
-              null,
-
-            unreadCount:
-              unreadCount || 0,
-          }
-        })
-      )
-
-    // ============================================
-    // SORT
-    // ============================================
-
-    setConversations(
-      sortConversations(
-        conversationResults
-      )
-    )
+    setConversations(Array.isArray(data) ? data as Conversation[] : [])
 
     setLoading(false)
   }
@@ -624,6 +427,13 @@ export default function ChatsPage() {
       0
     )
 
+  const searchWords = searchQuery.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean)
+  const filteredConversations = conversations.filter(conversation => {
+    const name = `${conversation.otherUser?.first_name || 'Unknown'} ${conversation.otherUser?.last_name || ''}`
+      .toLocaleLowerCase()
+    return searchWords.every(word => name.includes(word))
+  })
+
   // ============================================
   // PAGE
   // ============================================
@@ -706,6 +516,33 @@ export default function ChatsPage() {
           </div>
         )}
 
+        <div className="mb-6">
+          <label htmlFor="chat-search" className="mb-2 block text-sm font-semibold">
+            Search conversations
+          </label>
+          <div className="flex items-center gap-2">
+            <input
+              id="chat-search"
+              type="search"
+              value={searchQuery}
+              onChange={event => setSearchQuery(event.target.value)}
+              placeholder="Search by name"
+              className="block w-full min-w-0 rounded-2xl border border-gray-200 bg-white px-4 py-3 text-base outline-none focus:ring-2 focus:ring-blue-500"
+            />
+            {searchQuery && (
+              <button type="button" onClick={() => setSearchQuery('')}
+                className="shrink-0 rounded-xl px-3 py-3 text-sm font-semibold">
+                Clear
+              </button>
+            )}
+          </div>
+          {searchQuery.trim() && (
+            <p role="status" className="mt-2 text-sm text-gray-500">
+              {filteredConversations.length} {filteredConversations.length === 1 ? 'conversation' : 'conversations'} found
+            </p>
+          )}
+        </div>
+
         {/* CONVERSATIONS */}
 
         {conversations.length === 0 ? (
@@ -741,11 +578,20 @@ export default function ChatsPage() {
 
           </div>
 
+        ) : filteredConversations.length === 0 ? (
+          <div className="rounded-3xl border border-gray-200/70 bg-white p-8 text-center">
+            <h2 className="font-semibold">No conversations match your search</h2>
+            <p className="mt-2 text-sm text-gray-500">Try another name or clear your search.</p>
+            <button type="button" onClick={() => setSearchQuery('')}
+              className="mt-4 rounded-xl border border-gray-200 px-4 py-3 font-semibold">
+              Clear search
+            </button>
+          </div>
         ) : (
 
           <div className="overflow-hidden rounded-3xl border border-gray-200/70 bg-white shadow-sm">
 
-            {conversations.map(
+            {filteredConversations.map(
               (
                 conversation,
                 index
@@ -782,7 +628,7 @@ export default function ChatsPage() {
                     }}
                     className={`flex w-full items-center gap-4 p-5 text-left transition hover:bg-gray-50 ${
                       index !==
-                      conversations.length - 1
+                      filteredConversations.length - 1
                         ? 'border-b border-gray-100'
                         : ''
                     }`}

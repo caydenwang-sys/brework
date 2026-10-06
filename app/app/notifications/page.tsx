@@ -280,6 +280,8 @@ export default function NotificationsPage() {
       return
     }
 
+    window.dispatchEvent(new Event('brework:notifications-changed'))
+
     setNotifications((current) =>
       current.map((notification) =>
         notification.id === notificationId
@@ -471,6 +473,8 @@ export default function NotificationsPage() {
       setMarkingAll(false)
       return
     }
+
+    window.dispatchEvent(new Event('brework:notifications-changed'))
 
     setNotifications((current) =>
       current.map((notification) => ({

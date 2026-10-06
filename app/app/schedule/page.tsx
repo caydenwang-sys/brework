@@ -4,6 +4,7 @@ import {
   Suspense,
   useEffect,
   useState,
+  useRef,
 } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import {
@@ -26,14 +27,6 @@ type Profile = {
   career_goal: string | null
 }
 
-type Availability = {
-  id: number
-  user_id: string
-  day_of_week: number
-  start_time: string
-  end_time: string
-}
-
 type Meeting = {
   id: number
   match_id: number | null
@@ -44,11 +37,56 @@ type Meeting = {
   status: string | null
 }
 
-type OverlappingTime = {
+type PreferredTime = {
+  id: number
   day_of_week: number
   start_time: string
   end_time: string
-  date: string
+}
+
+const preferredDays = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+
+function nextPreferredDate(slot: PreferredTime) {
+  const today = pacificToday()
+  const date = new Date(`${today}T12:00:00Z`)
+  const difference = ((slot.day_of_week % 7) - date.getUTCDay() + 7) % 7
+  date.setUTCDate(date.getUTCDate() + difference)
+  let day = date.toISOString().slice(0, 10)
+  if (pacificTimestamp(day, slot.start_time) <= Date.now() || !Number.isFinite(pacificTimestamp(day, slot.start_time))) {
+    date.setUTCDate(date.getUTCDate() + 7)
+    day = date.toISOString().slice(0, 10)
+  }
+  return day
+}
+
+type ProposedTime = { date: string; start_time: string; end_time: string }
+
+function pacificToday() {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(new Date())
+  const value = (name: string) => parts.find(part => part.type === name)?.value || ''
+  return `${value('year')}-${value('month')}-${value('day')}`
+}
+
+// Meetings use campus wall-clock times. Resolve Pacific DST rather than the device timezone.
+function pacificTimestamp(date: string, time: string) {
+  const [year, month, day] = date.split('-').map(Number)
+  const [hour, minute] = time.split(':').map(Number)
+  const wallTime = Date.UTC(year, month - 1, day, hour, minute)
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
+  })
+  let instant = wallTime
+  for (let step = 0; step < 4; step++) {
+    const parts = formatter.formatToParts(new Date(instant))
+    const value = (name: string) => Number(parts.find(part => part.type === name)?.value)
+    const displayed = Date.UTC(value('year'), value('month') - 1, value('day'), value('hour'), value('minute'))
+    if (displayed === wallTime) return instant
+    instant += wallTime - displayed
+  }
+  return NaN
 }
 
 // ============================================
@@ -84,44 +122,6 @@ function minutesToTime(minutes: number) {
 // DATE HELPERS
 // ============================================
 
-function getNextDateForDay(dayOfWeek: number) {
-  const today = new Date()
-
-  // JavaScript:
-  // Sunday = 0
-  // Monday = 1
-  // ...
-  // Saturday = 6
-  //
-  // Brework:
-  // Monday = 1
-  // ...
-  // Sunday = 7
-
-  const currentDay =
-    today.getDay() === 0
-      ? 7
-      : today.getDay()
-
-  let difference =
-    dayOfWeek - currentDay
-
-  // Always use the next occurrence.
-  // If availability is Monday and today is Monday,
-  // use next Monday rather than today.
-  if (difference <= 0) {
-    difference += 7
-  }
-
-  const result = new Date(today)
-
-  result.setDate(
-    today.getDate() + difference
-  )
-
-  return result
-}
-
 function formatDate(dateString: string) {
   const date = new Date(
     `${dateString}T00:00:00`
@@ -132,14 +132,6 @@ function formatDate(dateString: string) {
     month: 'long',
     day: 'numeric',
   })
-}
-
-function dateToString(date: Date) {
-  return (
-    `${date.getFullYear()}-` +
-    `${String(date.getMonth() + 1).padStart(2, '0')}-` +
-    `${String(date.getDate()).padStart(2, '0')}`
-  )
 }
 
 // ============================================
@@ -167,23 +159,14 @@ function SchedulePageContent() {
   const [profiles, setProfiles] =
     useState<Record<string, Profile>>({})
 
-  const [availability, setAvailability] =
-    useState<Availability[]>([])
-
   const [meetings, setMeetings] =
     useState<Meeting[]>([])
 
   const [selectedMatch, setSelectedMatch] =
     useState<Match | null>(null)
 
-  const [overlappingTimes, setOverlappingTimes] =
-    useState<OverlappingTime[]>([])
-
   const [loading, setLoading] =
     useState(true)
-
-  const [loadingTimes, setLoadingTimes] =
-    useState(false)
 
   const [scheduling, setScheduling] =
     useState(false)
@@ -202,6 +185,60 @@ function SchedulePageContent() {
 
   const [matchSearch, setMatchSearch] =
     useState('')
+
+  const [proposedDate, setProposedDate] = useState(pacificToday)
+  const [proposedStart, setProposedStart] = useState('')
+  const [duration, setDuration] = useState(30)
+  const schedulingLock = useRef(false)
+  const [preferredTimes, setPreferredTimes] = useState<PreferredTime[]>([])
+  const [preferredOwner, setPreferredOwner] = useState<number | null>(null)
+  const [preferredLoading, setPreferredLoading] = useState(false)
+  const [preferredError, setPreferredError] = useState('')
+  const [preferredReload, setPreferredReload] = useState(0)
+
+  useEffect(() => {
+    if (!selectedMatch || !userId) return
+    let active = true
+    const matchId = selectedMatch.id
+    const otherUserId = selectedMatch.user_1_id === userId
+      ? selectedMatch.user_2_id : selectedMatch.user_1_id
+    setPreferredOwner(matchId)
+    setPreferredTimes([])
+    setPreferredLoading(true)
+    setPreferredError('')
+
+    async function loadPreferredTimes() {
+      try {
+        const supabase = createClient()
+        const { data, error: loadError } = await supabase
+          .from('availability')
+          .select('id,day_of_week,start_time,end_time')
+          .eq('user_id', otherUserId)
+          .order('day_of_week', { ascending: true })
+          .order('start_time', { ascending: true })
+        if (loadError) throw loadError
+        if (active) setPreferredTimes((data || []) as PreferredTime[])
+      } catch (cause) {
+        console.error('Could not load preferred times:', cause)
+        if (active) setPreferredError('Preferred times could not be loaded. You can still suggest any time below.')
+      } finally {
+        if (active) setPreferredLoading(false)
+      }
+    }
+    void loadPreferredTimes()
+    return () => { active = false }
+  }, [selectedMatch, userId, preferredReload])
+
+  function usePreferredTime(slot: PreferredTime) {
+    if (schedulingLock.current) return
+    setProposedDate(nextPreferredDate(slot))
+    setProposedStart(slot.start_time.slice(0, 5))
+    const windowLength = timeToMinutes(slot.end_time) - timeToMinutes(slot.start_time)
+    const suggestedDuration = [30, 15, 45, 60].find(minutes => minutes <= windowLength)
+    setDuration(suggestedDuration || 15)
+    setError('')
+    setSuccess('')
+  }
 
   // ============================================
   // LOAD SCHEDULE DATA
@@ -322,42 +359,6 @@ function SchedulePageContent() {
 
         setProfiles(profileMap)
       }
-
-      // ------------------------------------------
-      // GET MY AVAILABILITY
-      // ------------------------------------------
-
-      const {
-        data: myAvailability,
-        error: availabilityError,
-      } =
-        await supabase
-          .from('availability')
-          .select(`
-            id,
-            user_id,
-            day_of_week,
-            start_time,
-            end_time
-          `)
-          .eq('user_id', user.id)
-
-      if (availabilityError) {
-        console.error(
-          availabilityError
-        )
-
-        setError(
-          `Could not load your availability: ${availabilityError.message}`
-        )
-
-        setLoading(false)
-        return
-      }
-
-      setAvailability(
-        (myAvailability || []) as Availability[]
-      )
 
       // ------------------------------------------
       // GET EXISTING MEETINGS
@@ -497,7 +498,7 @@ function SchedulePageContent() {
         major.includes(search) ||
         careerGoal.includes(search)
       )
-    })
+    }).sort((a, b) => Number(b.id === selectedMatch?.id) - Number(a.id === selectedMatch?.id))
 
   // ============================================
   // RELOAD MEETINGS
@@ -556,276 +557,17 @@ function SchedulePageContent() {
     )
   }
 
-  // ============================================
-  // FIND OVERLAPPING AVAILABILITY
-  // ============================================
-
-  async function findOverlappingTimes(
-    match: Match
-  ) {
-    if (!userId) {
-      return
-    }
-
-    const otherUserId =
-      getOtherUserId(match)
-
-    if (!otherUserId) {
-      return
-    }
-
-    const supabase = createClient()
-
-    setLoadingTimes(true)
-    setError('')
-    setOverlappingTimes([])
-
-    // ------------------------------------------
-    // GET OTHER USER AVAILABILITY
-    // ------------------------------------------
-
-    const {
-      data: otherAvailability,
-      error: otherAvailabilityError,
-    } =
-      await supabase
-        .from('availability')
-        .select(`
-          id,
-          user_id,
-          day_of_week,
-          start_time,
-          end_time
-        `)
-        .eq('user_id', otherUserId)
-
-    if (otherAvailabilityError) {
-      console.error(
-        otherAvailabilityError
-      )
-
-      setError(
-        `Could not load your match's availability: ${otherAvailabilityError.message}`
-      )
-
-      setLoadingTimes(false)
-      return
-    }
-
-    const otherList =
-      (otherAvailability || []) as Availability[]
-
-    // ------------------------------------------
-    // FIND OVERLAPS
-    // ------------------------------------------
-
-    const overlaps: OverlappingTime[] = []
-
-    for (const mine of availability) {
-      const matchesForDay =
-        otherList.filter(
-          (other) =>
-            other.day_of_week ===
-            mine.day_of_week
-        )
-
-      for (const other of matchesForDay) {
-        const mineStart =
-          timeToMinutes(
-            mine.start_time
-          )
-
-        const mineEnd =
-          timeToMinutes(
-            mine.end_time
-          )
-
-        const otherStart =
-          timeToMinutes(
-            other.start_time
-          )
-
-        const otherEnd =
-          timeToMinutes(
-            other.end_time
-          )
-
-        const overlapStart =
-          Math.max(
-            mineStart,
-            otherStart
-          )
-
-        const overlapEnd =
-          Math.min(
-            mineEnd,
-            otherEnd
-          )
-
-        // Require at least one hour
-        if (
-          overlapEnd -
-            overlapStart >=
-          60
-        ) {
-          const date =
-            getNextDateForDay(
-              mine.day_of_week
-            )
-
-          overlaps.push({
-            day_of_week:
-              mine.day_of_week,
-
-            start_time:
-              minutesToTime(
-                overlapStart
-              ),
-
-            end_time:
-              minutesToTime(
-                overlapEnd
-              ),
-
-            date:
-              dateToString(date),
-          })
-        }
-      }
-    }
-
-    // ------------------------------------------
-    // REMOVE DUPLICATES
-    // ------------------------------------------
-
-    const uniqueOverlaps =
-      overlaps.filter(
-        (item, index, array) =>
-          index ===
-          array.findIndex(
-            (other) =>
-              other.date ===
-                item.date &&
-              other.start_time ===
-                item.start_time &&
-              other.end_time ===
-                item.end_time
-          )
-      )
-
-    // ------------------------------------------
-    // REMOVE ALREADY BOOKED TIMES
-    //
-    // IMPORTANT:
-    // cancelled meetings DO NOT block a slot.
-    // ------------------------------------------
-
-    const availableOverlaps =
-      uniqueOverlaps.filter(
-        (overlap) => {
-          const overlapStart =
-            timeToMinutes(
-              overlap.start_time
-            )
-
-          const overlapEnd =
-            timeToMinutes(
-              overlap.end_time
-            )
-
-          const alreadyBooked =
-            meetings.some(
-              (meeting) => {
-
-                if (
-                  meeting.match_id !==
-                    match.id ||
-                  meeting.scheduled_date !==
-                    overlap.date ||
-                  !meeting.start_time ||
-                  (
-                    meeting.status !==
-                      'pending' &&
-                    meeting.status !==
-                      'scheduled'
-                  )
-                ) {
-                  return false
-                }
-
-                const meetingStart =
-                  timeToMinutes(
-                    meeting.start_time
-                  )
-
-                const meetingEnd =
-                  meeting.end_time
-                    ? timeToMinutes(
-                        meeting.end_time
-                      )
-                    : meetingStart + 60
-
-                return (
-                  overlapStart <
-                    meetingEnd &&
-                  overlapEnd >
-                    meetingStart
-                )
-              }
-            )
-
-          return !alreadyBooked
-        }
-      )
-
-    // ------------------------------------------
-    // SORT
-    // ------------------------------------------
-
-    availableOverlaps.sort(
-      (a, b) => {
-        if (
-          a.date !== b.date
-        ) {
-          return a.date.localeCompare(
-            b.date
-          )
-        }
-
-        return (
-          timeToMinutes(
-            a.start_time
-          ) -
-          timeToMinutes(
-            b.start_time
-          )
-        )
-      }
-    )
-
-    setOverlappingTimes(
-      availableOverlaps
-    )
-
-    setLoadingTimes(false)
-  }
-
-  // ============================================
-  // SELECT MATCH
-  // ============================================
-
-  async function selectMatch(
-    match: Match
-  ) {
+  function selectMatch(match: Match) {
+    if (schedulingLock.current) return
+    setPreferredOwner(null)
     setSelectedMatch(match)
-
     setLocation('')
+    setProposedDate(pacificToday())
+    setProposedStart('')
+    setDuration(30)
+    setMatchSearch('')
     setError('')
     setSuccess('')
-
-    await findOverlappingTimes(
-      match
-    )
   }
 
   // ============================================
@@ -867,18 +609,19 @@ function SchedulePageContent() {
   // ============================================
 
   async function scheduleMeeting(
-    overlap: OverlappingTime
+    overlap: ProposedTime
   ) {
     if (
       !selectedMatch ||
       !userId ||
-      scheduling
+      schedulingLock.current
     ) {
       return
     }
 
     setError('')
     setSuccess('')
+    schedulingLock.current = true
     setScheduling(true)
 
     const supabase = createClient()
@@ -891,12 +634,13 @@ function SchedulePageContent() {
         'Could not determine who to send this coffee chat request to.'
       )
 
+      schedulingLock.current = false
       setScheduling(false)
       return
     }
 
     const {
-      data: existingMeeting,
+      data: existingMeetings,
       error: existingMeetingError,
     } =
       await supabase
@@ -925,8 +669,7 @@ function SchedulePageContent() {
             'scheduled',
           ]
         )
-        .limit(1)
-        .maybeSingle()
+
 
     if (existingMeetingError) {
       console.error(
@@ -937,22 +680,35 @@ function SchedulePageContent() {
         `Could not check for an existing meeting: ${existingMeetingError.message}`
       )
 
+      schedulingLock.current = false
       setScheduling(false)
       return
     }
 
-    if (existingMeeting) {
+    // Preferred windows are suggestions; reserve only actual meeting times.
+    const minutes = (time: string) => {
+      const [hours, mins] = time.split(':').map(Number)
+      return hours * 60 + mins
+    }
+    const proposedStart = minutes(overlap.start_time)
+    const proposedEnd = minutes(overlap.end_time)
+    const conflictingMeeting = existingMeetings?.find(meeting => {
+      if (!meeting.start_time) return false
+      const start = minutes(meeting.start_time)
+      const end = meeting.end_time ? minutes(meeting.end_time) : start + 30
+      return proposedStart < end && proposedEnd > start
+    })
+
+    if (conflictingMeeting) {
       setError(
-        'You already have a coffee chat or pending request with this match on this date.'
+        'This time overlaps another coffee chat or pending request with this person. Choose a different time.'
       )
 
+      schedulingLock.current = false
       setScheduling(false)
 
       await reloadMeetings()
 
-      await findOverlappingTimes(
-        selectedMatch
-      )
 
       return
     }
@@ -1012,6 +768,7 @@ function SchedulePageContent() {
         `Could not send this coffee chat request: ${meetingError.message}`
       )
 
+      schedulingLock.current = false
       setScheduling(false)
       return
     }
@@ -1025,26 +782,40 @@ function SchedulePageContent() {
       )
     }
 
-    setOverlappingTimes(
-      (current) =>
-        current.filter(
-          (item) =>
-            !(
-              item.date ===
-                overlap.date &&
-              item.start_time ===
-                overlap.start_time
-            )
-        )
-    )
-
     setSuccess(
       `Coffee chat request sent to ${getProfileName(
         selectedMatch
       )}! They'll need to accept it before the chat is confirmed.`
     )
 
+    schedulingLock.current = false
     setScheduling(false)
+  }
+
+  async function submitProposal() {
+    if (!selectedMatch || schedulingLock.current) return
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(proposedDate) || !/^\d{2}:\d{2}$/.test(proposedStart)) {
+      setError('Choose a date and start time.')
+      return
+    }
+    const instant = pacificTimestamp(proposedDate, proposedStart)
+    if (!Number.isFinite(instant) || instant <= Date.now()) {
+      setError('Choose a valid future time in Pacific time. This time may already have passed or fall during a daylight saving clock change.')
+      return
+    }
+    const endMinutes = timeToMinutes(proposedStart) + duration
+    if (endMinutes >= 24 * 60) {
+      setError('Choose a time that finishes before midnight, or use a shorter duration.')
+      return
+    }
+    try {
+      await scheduleMeeting({ date: proposedDate, start_time: proposedStart, end_time: minutesToTime(endMinutes) })
+    } catch (cause) {
+      console.error('Could not send coffee chat request:', cause)
+      setError('Could not send the request. Check your connection and try again.')
+      schedulingLock.current = false
+      setScheduling(false)
+    }
   }
 
   // ============================================
@@ -1212,11 +983,7 @@ function SchedulePageContent() {
 
     await reloadMeetings()
 
-    if (selectedMatch) {
-      await findOverlappingTimes(
-        selectedMatch
-      )
-    }
+
   }
 
   // ============================================
@@ -1297,7 +1064,7 @@ function SchedulePageContent() {
           </h1>
 
           <p className="mt-3 max-w-xl text-base leading-relaxed text-gray-500">
-            Choose a match and find a time that works for both of you.
+            Suggest a time, or discuss the details in chat first. Your connection confirms before it goes on your calendars.
           </p>
 
         </section>
@@ -1328,6 +1095,13 @@ function SchedulePageContent() {
           </div>
         )}
 
+        {selectedMatch && (
+          <div className="mb-6 rounded-2xl border border-gray-200 bg-white p-4">
+            <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">Coffee chat with</p>
+            <p className="mt-1 text-xl font-bold">{getProfileName(selectedMatch)}</p>
+          </div>
+        )}
+
         <div className="grid gap-8 lg:grid-cols-[1fr_1.4fr]">
 
           {/* MATCHES */}
@@ -1335,7 +1109,7 @@ function SchedulePageContent() {
           <section className="rounded-3xl border border-gray-200/70 bg-white p-6 shadow-sm">
 
             <p className="text-xs font-semibold uppercase tracking-[0.18em] text-gray-400">
-              Your matches
+              Your connections
             </p>
 
             <h2 className="mt-2 text-2xl font-bold">
@@ -1351,7 +1125,7 @@ function SchedulePageContent() {
                 </div>
 
                 <h3 className="mt-4 font-semibold">
-                  No active matches
+                  No connections yet
                 </h3>
 
                 <p className="mt-1 text-sm leading-relaxed text-gray-500">
@@ -1383,7 +1157,8 @@ function SchedulePageContent() {
                   </span>
 
                   <input
-                    type="text"
+                    type="search"
+                    aria-label="Search connections"
                     value={matchSearch}
                     onChange={(event) =>
                       setMatchSearch(
@@ -1443,6 +1218,8 @@ function SchedulePageContent() {
                           <button
                             key={match.id}
                             type="button"
+                            disabled={scheduling}
+                            aria-pressed={isSelected}
                             onClick={() =>
                               selectMatch(
                                 match
@@ -1489,205 +1266,83 @@ function SchedulePageContent() {
           </section>
 
           {/* SCHEDULING AREA */}
-
-          <section className="rounded-3xl border border-gray-200/70 bg-white p-6 shadow-sm">
-
+          <section className={`${selectedMatch ? 'order-first lg:order-last' : ''} rounded-3xl border border-gray-200/70 bg-white p-6 shadow-sm`}>
             {!selectedMatch ? (
-
-              <div className="flex min-h-[400px] items-center justify-center text-center">
-
-                <div>
-
-                  <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-gray-50 text-2xl">
-                    ☕
-                  </div>
-
-                  <h2 className="mt-5 text-2xl font-bold">
-                    Pick a match
-                  </h2>
-
-                  <p className="mt-2 max-w-sm text-sm leading-relaxed text-gray-500">
-                    Select someone from the left to find a time that works for both of you.
-                  </p>
-
-                </div>
-
+              <div className="py-12 text-center">
+                <h2 className="text-2xl font-bold">Who would you like to meet?</h2>
+                <p className="mt-3 text-sm text-gray-500">Choose a connection to suggest a time. You do not need matching availability.</p>
               </div>
-
             ) : (
-
-              <div>
-
-                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-gray-400">
-                  Schedule with
-                </p>
-
-                <h2 className="mt-2 text-3xl font-bold">
-                  {getProfileName(
-                    selectedMatch
-                  )}
-                </h2>
-
-                <p className="mt-3 text-sm leading-relaxed text-gray-500">
-                  These are the times when your availability overlaps.
-                </p>
-
-                <div className="mt-6">
-
-                  <label className="text-sm font-semibold text-gray-700">
-                    Location
-                  </label>
-
-                  <input
-                    type="text"
-                    value={location}
-                    onChange={(event) =>
-                      setLocation(event.target.value)
-                    }
-                    placeholder="e.g. Geisel Library, Price Center, Zoom..."
-                    maxLength={150}
-                    className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-4 py-3 outline-none transition focus:border-gray-400 focus:ring-2 focus:ring-gray-100"
-                  />
-
-                  <p className="mt-2 text-xs text-gray-400">
-                    Add where you&apos;d like to meet. You can also enter an online meeting location.
-                  </p>
-
-                </div>
-
-                {loadingTimes && (
-                  <div className="mt-8 rounded-2xl bg-gray-50 p-6 text-center">
-
-                    <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-white text-xl shadow-sm">
-                      🕐
+              <form onSubmit={event => { event.preventDefault(); void submitProposal() }}>
+                <h2 className="text-2xl font-bold">Suggest a time</h2>
+                <p className="mt-2 text-sm text-gray-500">{getProfileName(selectedMatch)} will review your request. Availability blocks are optional.</p>
+                <p className="mt-3 text-sm font-semibold">All times are Pacific time (UCSD).</p>
+                <section aria-labelledby="preferred-times-heading" className="mt-5 rounded-2xl border border-gray-200 bg-gray-50 p-4">
+                  <h3 id="preferred-times-heading" className="font-semibold">{getProfileName(selectedMatch)}&apos;s preferred times</h3>
+                  <p className="mt-1 text-xs text-gray-500">Weekly preferences in Pacific time. These are suggestions, not confirmed bookings. You can request any other time.</p>
+                  {preferredOwner !== selectedMatch.id || preferredLoading ? (
+                    <p role="status" className="mt-3 text-sm text-gray-500">Loading preferred times…</p>
+                  ) : preferredError ? (
+                    <div className="mt-3">
+                      <p className="text-sm text-gray-500">{preferredError}</p>
+                      <button type="button" onClick={() => setPreferredReload(value => value + 1)} className="mt-2 text-sm font-semibold underline">Try again</button>
                     </div>
-
-                    <p className="mt-4 text-sm font-medium text-gray-500">
-                      Finding overlapping times...
-                    </p>
-
+                  ) : preferredTimes.length === 0 ? (
+                    <p className="mt-3 text-sm text-gray-500">No preferred times are available to show. Suggest a time below or discuss it in chat.</p>
+                  ) : (
+                    <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                      {preferredTimes.map(slot => (
+                        <button key={slot.id} type="button" disabled={scheduling} onClick={() => usePreferredTime(slot)}
+                          className="rounded-xl border border-gray-200 bg-white p-3 text-left transition hover:border-gray-400 disabled:opacity-50">
+                          <span className="block text-sm font-semibold">{preferredDays[slot.day_of_week % 7]}</span>
+                          <span className="mt-1 block text-sm text-gray-500">{formatTime(slot.start_time)} – {formatTime(slot.end_time)}</span>
+                          <span className="mt-2 block text-xs font-semibold">Use next {preferredDays[slot.day_of_week % 7]} →</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </section>
+                <p className="mt-5 text-sm font-semibold">Choose a preferred time above, or suggest your own below.</p>
+                <fieldset disabled={scheduling} className="mt-6 space-y-5 disabled:opacity-70">
+                  <div>
+                    <label htmlFor="coffee-date" className="block text-sm font-semibold">Date</label>
+                    <input id="coffee-date" type="date" required min={pacificToday()} value={proposedDate}
+                      onChange={event => setProposedDate(event.target.value)}
+                      className="mt-2 block w-full min-w-0 rounded-xl border border-gray-200 bg-white px-3 py-3 text-base" />
                   </div>
-                )}
-
-                {!loadingTimes &&
-                  overlappingTimes.length === 0 && (
-                    <div className="mt-8 rounded-2xl bg-gray-50 p-6 text-center">
-
-                      <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-white text-xl shadow-sm">
-                        🗓️
-                      </div>
-
-                      <h3 className="mt-4 font-semibold">
-                        No available times
-                      </h3>
-
-                      <p className="mt-1 text-sm leading-relaxed text-gray-500">
-                        You and your match don't currently have an available shared time.
-                      </p>
-
-                      <button
-                        type="button"
-                        onClick={() =>
-                          router.push(
-                            '/availability'
-                          )
-                        }
-                        className="mt-5 rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm font-semibold text-gray-600 transition hover:bg-gray-100"
-                      >
-                        Manage my availability
-                      </button>
-
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="min-w-0">
+                      <label htmlFor="coffee-time" className="block text-sm font-semibold">Start time</label>
+                      <input id="coffee-time" type="time" required value={proposedStart}
+                        onChange={event => setProposedStart(event.target.value)}
+                        className="mt-2 block w-full min-w-0 rounded-xl border border-gray-200 bg-white px-3 py-3 text-base" />
                     </div>
-                  )}
-
-                {!loadingTimes &&
-                  overlappingTimes.length > 0 && (
-                    <div className="mt-8">
-
-                      <p className="text-sm font-semibold text-gray-700">
-                        Available times
-                      </p>
-
-                      <div className="mt-4 space-y-3">
-
-                        {overlappingTimes.map(
-                          (
-                            overlap,
-                            index
-                          ) => (
-
-                            <div
-                              key={`${overlap.date}-${overlap.start_time}-${overlap.end_time}-${index}`}
-                              className="rounded-2xl border border-gray-200/70 bg-gray-50 p-4"
-                            >
-
-                              <div className="flex items-start justify-between gap-4">
-
-                                <div>
-
-                                  <p className="font-semibold">
-                                    {formatDate(
-                                      overlap.date
-                                    )}
-                                  </p>
-
-                                  <p className="mt-1 text-sm text-gray-500">
-                                    {formatTime(
-                                      overlap.start_time
-                                    )}
-                                    {' – '}
-                                    {formatTime(
-                                      overlap.end_time
-                                    )}
-                                  </p>
-
-                                </div>
-
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    scheduleMeeting(
-                                      overlap
-                                    )
-                                  }
-                                  disabled={
-                                    scheduling
-                                  }
-                                  className="shrink-0 rounded-xl bg-black px-4 py-3 text-xs font-semibold text-white transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-50"
-                                >
-                                  {scheduling
-                                    ? 'Sending...'
-                                    : 'Send request →'}
-                                </button>
-
-                              </div>
-
-                            </div>
-
-                          )
-                        )}
-
-                      </div>
-
+                    <div className="min-w-0">
+                      <label htmlFor="coffee-duration" className="block text-sm font-semibold">Duration</label>
+                      <select id="coffee-duration" value={duration} onChange={event => setDuration(Number(event.target.value))}
+                        className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-3 py-3 text-base">
+                        {[15, 30, 45, 60].map(minutes => <option key={minutes} value={minutes}>{minutes} minutes</option>)}
+                      </select>
                     </div>
-                  )}
-
-                <button
-                  type="button"
-                  onClick={() =>
-                    router.push(
-                      '/availability'
-                    )
-                  }
-                  className="mt-6 w-full rounded-2xl border border-gray-200 px-5 py-4 text-sm font-semibold text-gray-600 transition hover:bg-gray-50"
-                >
-                  Manage my availability
+                  </div>
+                  <div>
+                    <label htmlFor="coffee-location" className="block text-sm font-semibold">Place or video link (optional)</label>
+                    <input id="coffee-location" type="text" value={location} maxLength={150}
+                      onChange={event => setLocation(event.target.value)} placeholder="A campus café, Zoom, or decide in chat"
+                      className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-3 py-3 text-base" />
+                  </div>
+                  <button type="submit" className="w-full rounded-xl bg-black px-4 py-3 font-semibold text-white">
+                    {scheduling ? 'Sending…' : 'Send coffee chat request'}
+                  </button>
+                </fieldset>
+                <button type="button" disabled={scheduling}
+                  onClick={() => router.push(`/chats/conversation?matchId=${selectedMatch.id}`)}
+                  className="mt-3 w-full rounded-xl border border-gray-200 px-4 py-3 text-sm font-semibold">
+                  Discuss time and place in chat
                 </button>
-
-              </div>
-
+                <p className="mt-3 text-xs text-gray-500">Once you agree in chat, send the time here so it can be confirmed and added to both Brework calendars.</p>
+              </form>
             )}
-
           </section>
 
         </div>

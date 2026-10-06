@@ -1,12 +1,13 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { useRouter } from 'next/navigation'
 
-function PrivacySwitch({ checked, label, onToggle }: {
+function PrivacySwitch({ checked, label, onToggle, disabled }: {
   checked: boolean
   label: string
+  disabled: boolean
   onToggle: () => void
 }) {
   return (
@@ -16,7 +17,8 @@ function PrivacySwitch({ checked, label, onToggle }: {
       aria-checked={checked}
       aria-label={label}
       onClick={onToggle}
-      className="flex min-h-11 shrink-0 items-center gap-2 rounded-xl px-1 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-blue-500"
+      disabled={disabled}
+      className="disabled:cursor-wait disabled:opacity-70 flex min-h-11 shrink-0 items-center gap-2 rounded-xl px-1 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-blue-500"
     >
       <span className="w-7 text-xs font-bold">{checked ? 'On' : 'Off'}</span>
       <span
@@ -42,6 +44,8 @@ export default function PrivacySettingsPage() {
 
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  const [ready, setReady] = useState(false)
+  const saveLock = useRef(false)
 
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
@@ -85,53 +89,54 @@ export default function PrivacySettingsPage() {
       setShowAcademicInfo(data.show_academic_info)
       setShowCareerGoal(data.show_career_goal)
 
+      setReady(true)
       setLoading(false)
     }
 
     loadPrivacySettings()
   }, [router])
 
-  async function savePrivacySettings() {
-    if (saving) {
-      return
-    }
-
+  async function togglePrivacy(field: 'is_discoverable' | 'show_academic_info' | 'show_career_goal') {
+    if (saveLock.current || !ready) return
+    saveLock.current = true
     setSaving(true)
     setError('')
     setSuccess('')
 
-    const supabase = createClient()
+    const previous = field === 'is_discoverable' ? isDiscoverable
+      : field === 'show_academic_info' ? showAcademicInfo : showCareerGoal
+    const setValue = field === 'is_discoverable' ? setIsDiscoverable
+      : field === 'show_academic_info' ? setShowAcademicInfo : setShowCareerGoal
+    const next = !previous
+    setValue(next)
 
-    const {
-      data: { user },
-      error: userError,
-    } = await supabase.auth.getUser()
+    try {
+      const supabase = createClient()
+      const { data: { user }, error: userError } = await supabase.auth.getUser()
+      if (userError || !user) {
+        setValue(previous)
+        router.push('/login')
+        return
+      }
 
-    if (userError || !user) {
+      const { error: saveError } = await supabase
+        .from('profiles')
+        .update({ [field]: next })
+        .eq('id', user.id)
+        .select('id')
+        .single()
+
+      if (saveError) throw saveError
+      setSuccess('Saved automatically.')
+    } catch (cause) {
+      setValue(previous)
+      const message = cause && typeof cause === 'object' && 'message' in cause
+        ? String(cause.message) : 'Please check your connection and try again.'
+      setError(`Could not save privacy settings: ${message} Your previous setting was restored. Tap the switch to try again.`)
+    } finally {
+      saveLock.current = false
       setSaving(false)
-      router.push('/login')
-      return
     }
-
-    const { error: updateError } = await supabase
-      .from('profiles')
-      .update({
-        is_discoverable: isDiscoverable,
-        show_academic_info: showAcademicInfo,
-        show_career_goal: showCareerGoal,
-      })
-      .eq('id', user.id)
-
-    if (updateError) {
-      setError(
-        `Could not save privacy settings: ${updateError.message}`
-      )
-      setSaving(false)
-      return
-    }
-
-    setSuccess('Privacy settings saved.')
-    setSaving(false)
   }
 
   if (loading) {
@@ -152,6 +157,7 @@ export default function PrivacySettingsPage() {
 
           <button
             type="button"
+            disabled={saving}
             onClick={() => router.push('/settings')}
             className="text-xl font-bold tracking-tight"
           >
@@ -160,6 +166,7 @@ export default function PrivacySettingsPage() {
 
           <button
             type="button"
+            disabled={saving}
             onClick={() => router.push('/settings')}
             className="rounded-full px-4 py-2 text-sm font-medium text-gray-500 transition hover:bg-gray-100 hover:text-black"
           >
@@ -184,13 +191,13 @@ export default function PrivacySettingsPage() {
         </p>
 
         {error && (
-          <div className="mt-6 rounded-2xl border border-red-100 bg-red-50 p-4 text-sm text-red-600">
+          <div role="alert" className="mt-6 rounded-2xl border border-red-100 bg-red-50 p-4 text-sm text-red-600">
             {error}
           </div>
         )}
 
         {success && (
-          <div className="mt-6 rounded-2xl border border-green-100 bg-green-50 p-4 text-sm text-green-700">
+          <div role="status" className="mt-6 rounded-2xl border border-green-100 bg-green-50 p-4 text-sm text-green-700">
             {success}
           </div>
         )}
@@ -212,11 +219,8 @@ export default function PrivacySettingsPage() {
             <PrivacySwitch
               checked={isDiscoverable}
               label="Appear in Discover"
-              onToggle={() => {
-                setIsDiscoverable(current => !current)
-                setSuccess('')
-                setError('')
-              }}
+              disabled={saving || !ready}
+              onToggle={() => { void togglePrivacy('is_discoverable') }}
             />
 
           </div>
@@ -238,11 +242,8 @@ export default function PrivacySettingsPage() {
             <PrivacySwitch
               checked={showAcademicInfo}
               label="Show academic information"
-              onToggle={() => {
-                setShowAcademicInfo(current => !current)
-                setSuccess('')
-                setError('')
-              }}
+              disabled={saving || !ready}
+              onToggle={() => { void togglePrivacy('show_academic_info') }}
             />
 
           </div>
@@ -264,27 +265,17 @@ export default function PrivacySettingsPage() {
             <PrivacySwitch
               checked={showCareerGoal}
               label="Show career interests"
-              onToggle={() => {
-                setShowCareerGoal(current => !current)
-                setSuccess('')
-                setError('')
-              }}
+              disabled={saving || !ready}
+              onToggle={() => { void togglePrivacy('show_career_goal') }}
             />
 
           </div>
 
         </section>
 
-        <button
-          type="button"
-          onClick={savePrivacySettings}
-          disabled={saving}
-          className="mt-6 w-full rounded-2xl bg-black px-5 py-4 font-semibold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {saving
-            ? 'Saving...'
-            : 'Save privacy settings'}
-        </button>
+        <p role="status" aria-live="polite" className="mt-6 text-sm text-gray-500">
+          {saving ? 'Saving…' : !error && !success ? 'Changes save automatically.' : ''}
+        </p>
 
       </div>
 
