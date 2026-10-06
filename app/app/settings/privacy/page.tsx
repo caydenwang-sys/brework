@@ -4,6 +4,35 @@ import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { useRouter } from 'next/navigation'
 
+function PrivacySwitch({ checked, label, onToggle }: {
+  checked: boolean
+  label: string
+  onToggle: () => void
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      onClick={onToggle}
+      className="flex min-h-11 shrink-0 items-center gap-2 rounded-xl px-1 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-blue-500"
+    >
+      <span className="w-7 text-xs font-bold">{checked ? 'On' : 'Off'}</span>
+      <span
+        aria-hidden="true"
+        className="relative block h-8 w-14 rounded-full border-2 transition-colors"
+        style={{ backgroundColor: checked ? '#15803d' : '#64748b', borderColor: checked ? '#15803d' : '#64748b' }}
+      >
+        <span
+          className="absolute top-0.5 block h-6 w-6 rounded-full shadow-sm transition-transform"
+          style={{ backgroundColor: '#ffffff', left: '2px', transform: checked ? 'translateX(24px)' : 'translateX(0)' }}
+        />
+      </span>
+    </button>
+  )
+}
+
 export default function PrivacySettingsPage() {
   const router = useRouter()
 
@@ -168,9 +197,9 @@ export default function PrivacySettingsPage() {
 
         <section className="mt-10 rounded-3xl border border-gray-200/70 bg-white p-6 shadow-sm">
 
-          <div className="flex items-center justify-between gap-6">
+          <div className="flex items-center justify-between gap-3">
 
-            <div>
+            <div className="min-w-0 flex-1">
               <h2 className="font-semibold">
                 Appear in Discover
               </h2>
@@ -180,35 +209,23 @@ export default function PrivacySettingsPage() {
               </p>
             </div>
 
-            <button
-              type="button"
-              onClick={() => {
-                setIsDiscoverable((current) => !current)
+            <PrivacySwitch
+              checked={isDiscoverable}
+              label="Appear in Discover"
+              onToggle={() => {
+                setIsDiscoverable(current => !current)
                 setSuccess('')
                 setError('')
               }}
-              className={`relative h-7 w-12 shrink-0 rounded-full transition ${
-                isDiscoverable
-                  ? 'bg-black'
-                  : 'bg-gray-300'
-              }`}
-            >
-              <span
-                className={`absolute top-1 h-5 w-5 rounded-full bg-white transition ${
-                  isDiscoverable
-                    ? 'left-6'
-                    : 'left-1'
-                }`}
-              />
-            </button>
+            />
 
           </div>
 
           <div className="my-6 border-t border-gray-100" />
 
-          <div className="flex items-center justify-between gap-6">
+          <div className="flex items-center justify-between gap-3">
 
-            <div>
+            <div className="min-w-0 flex-1">
               <h2 className="font-semibold">
                 Show academic information
               </h2>
@@ -218,35 +235,23 @@ export default function PrivacySettingsPage() {
               </p>
             </div>
 
-            <button
-              type="button"
-              onClick={() => {
-                setShowAcademicInfo((current) => !current)
+            <PrivacySwitch
+              checked={showAcademicInfo}
+              label="Show academic information"
+              onToggle={() => {
+                setShowAcademicInfo(current => !current)
                 setSuccess('')
                 setError('')
               }}
-              className={`relative h-7 w-12 shrink-0 rounded-full transition ${
-                showAcademicInfo
-                  ? 'bg-black'
-                  : 'bg-gray-300'
-              }`}
-            >
-              <span
-                className={`absolute top-1 h-5 w-5 rounded-full bg-white transition ${
-                  showAcademicInfo
-                    ? 'left-6'
-                    : 'left-1'
-                }`}
-              />
-            </button>
+            />
 
           </div>
 
           <div className="my-6 border-t border-gray-100" />
 
-          <div className="flex items-center justify-between gap-6">
+          <div className="flex items-center justify-between gap-3">
 
-            <div>
+            <div className="min-w-0 flex-1">
               <h2 className="font-semibold">
                 Show career interests
               </h2>
@@ -256,27 +261,15 @@ export default function PrivacySettingsPage() {
               </p>
             </div>
 
-            <button
-              type="button"
-              onClick={() => {
-                setShowCareerGoal((current) => !current)
+            <PrivacySwitch
+              checked={showCareerGoal}
+              label="Show career interests"
+              onToggle={() => {
+                setShowCareerGoal(current => !current)
                 setSuccess('')
                 setError('')
               }}
-              className={`relative h-7 w-12 shrink-0 rounded-full transition ${
-                showCareerGoal
-                  ? 'bg-black'
-                  : 'bg-gray-300'
-              }`}
-            >
-              <span
-                className={`absolute top-1 h-5 w-5 rounded-full bg-white transition ${
-                  showCareerGoal
-                    ? 'left-6'
-                    : 'left-1'
-                }`}
-              />
-            </button>
+            />
 
           </div>
 

@@ -1091,7 +1091,7 @@ export default function ConversationPage() {
                   >
 
                     <div
-                      className={`rounded-2xl px-4 py-3 text-sm leading-relaxed ${
+                      className={`min-w-0 [overflow-wrap:anywhere] rounded-2xl px-4 py-3 text-sm leading-relaxed ${
                         isMine
                           ? 'rounded-br-md bg-black text-white'
                           : 'rounded-bl-md bg-white text-gray-900 shadow-sm'
@@ -1346,7 +1346,7 @@ export default function ConversationPage() {
 
         <form
           onSubmit={sendMessage}
-          className="mx-auto flex max-w-3xl items-end gap-3 px-5 py-4 sm:px-6"
+          className="mx-auto grid w-full min-w-0 max-w-3xl grid-cols-[minmax(0,1fr)_auto] items-end gap-2 px-3 py-4 sm:gap-3 sm:px-6"
         >
 
           <input
@@ -1359,7 +1359,7 @@ export default function ConversationPage() {
             }
             placeholder={`Message ${firstName}...`}
             disabled={sending}
-            className="min-w-0 flex-1 rounded-2xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm outline-none transition placeholder:text-gray-400 focus:border-gray-400 focus:bg-white"
+            className="block w-full min-w-0 rounded-2xl border border-gray-200 bg-gray-50 px-3 py-3 text-base outline-none transition placeholder:text-gray-400 focus:border-gray-400 focus:bg-white"
           />
 
           <button
@@ -1368,7 +1368,7 @@ export default function ConversationPage() {
               sending ||
               !newMessage.trim()
             }
-            className="rounded-2xl bg-black px-5 py-3 text-sm font-bold text-white transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-40"
+            className="whitespace-nowrap rounded-2xl bg-black px-4 py-3 text-sm font-bold text-white transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-40"
           >
             {sending
               ? 'Sending...'
