@@ -39,7 +39,7 @@ export default function SignupPage() {
     const supabase = createClient()
 
     const { data, error } = await supabase.auth.signUp({
-      email,
+      email: email.trim(),
       password,
     })
 
@@ -87,7 +87,7 @@ export default function SignupPage() {
           </h1>
 
           <p className="mt-3 text-gray-600">
-            Start building meaningful connections at UCSD.
+            Start building meaningful connections with other students.
           </p>
 
         </div>
@@ -104,7 +104,7 @@ export default function SignupPage() {
               htmlFor="email"
               className="mb-2 block text-sm font-medium text-gray-900"
             >
-              UCSD Email
+              Email
             </label>
 
             <input
@@ -113,7 +113,7 @@ export default function SignupPage() {
               required
               value={email}
               onChange={(event) => setEmail(event.target.value)}
-              placeholder="you@ucsd.edu"
+              placeholder="you@example.com"
               className="w-full rounded-xl border border-gray-300 px-4 py-3 outline-none transition focus:border-black focus:ring-2 focus:ring-gray-200"
             />
           </div>

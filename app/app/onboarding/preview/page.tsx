@@ -654,6 +654,19 @@ export default function PreviewOnboardingPage() {
       return
     }
 
+    const { error: completionError } = await supabase
+      .from('profiles')
+      .update({ onboarding_completed_at: new Date().toISOString() })
+      .eq('id', user.id)
+      .select('id')
+      .single()
+
+    if (completionError) {
+      setError(`Could not finish onboarding: ${completionError.message}`)
+      setFinishing(false)
+      return
+    }
+
     router.push(
       '/dashboard'
     )

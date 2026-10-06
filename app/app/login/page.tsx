@@ -25,7 +25,7 @@ export default function LoginPage() {
       data: loginData,
       error,
     } = await supabase.auth.signInWithPassword({
-      email,
+      email: email.trim(),
       password,
     })
 
@@ -44,23 +44,23 @@ export default function LoginPage() {
     }
 
     const {
-      data: preferences,
-      error: preferencesError,
+      data: profile,
+      error: profileError,
     } = await supabase
-      .from('match_preferences')
-      .select('user_id')
-      .eq('user_id', user.id)
+      .from('profiles')
+      .select('onboarding_completed_at')
+      .eq('id', user.id)
       .maybeSingle()
 
-    if (preferencesError) {
+    if (profileError) {
       setError(
-        `Could not check your account setup: ${preferencesError.message}`
+        `Could not check your account setup: ${profileError.message}`
       )
       setLoading(false)
       return
     }
 
-    if (preferences) {
+    if (profile?.onboarding_completed_at) {
       router.push('/dashboard')
     } else {
       router.push('/onboarding')
@@ -87,7 +87,7 @@ export default function LoginPage() {
           </h1>
 
           <p className="mt-3 text-gray-600">
-            Sign in to continue connecting with UCSD students.
+            Sign in to continue connecting with other students.
           </p>
         </div>
 
@@ -103,7 +103,7 @@ export default function LoginPage() {
               htmlFor="email"
               className="mb-2 block text-sm font-medium text-gray-900"
             >
-              UCSD Email
+              Email
             </label>
 
             <input
@@ -112,7 +112,7 @@ export default function LoginPage() {
               required
               value={email}
               onChange={(event) => setEmail(event.target.value)}
-              placeholder="you@ucsd.edu"
+              placeholder="you@example.com"
               className="w-full rounded-xl border border-gray-300 px-4 py-3 outline-none transition focus:border-black focus:ring-2 focus:ring-gray-200"
             />
           </div>
@@ -135,6 +135,12 @@ export default function LoginPage() {
               placeholder="••••••••"
               className="w-full rounded-xl border border-gray-300 px-4 py-3 outline-none transition focus:border-black focus:ring-2 focus:ring-gray-200"
             />
+          </div>
+
+          <div className="text-right">
+            <Link href="/forgot-password" className="text-sm font-semibold underline">
+              Forgot password?
+            </Link>
           </div>
 
           {/* Error */}
