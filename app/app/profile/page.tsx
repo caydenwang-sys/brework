@@ -93,6 +93,70 @@ type AvailabilitySlot = {
   end_time: string
 }
 
+function useSectionAutosave(ready: boolean, key: string, valid: boolean, save: () => Promise<void>, delay = 600) {
+  const latest = useRef({ key, valid, save })
+  latest.current = { key, valid, save }
+  const baseline = useRef<string | null>(null)
+  const attempted = useRef<string | null>(null)
+  const inFlight = useRef<Promise<boolean> | null>(null)
+  const mounted = useRef(true)
+  const [status, setStatus] = useState('Changes save automatically.')
+  const [failed, setFailed] = useState(false)
+  const [revision, setRevision] = useState(0)
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
+
+  async function flush(): Promise<boolean> {
+    while (inFlight.current) await inFlight.current
+    if (!mounted.current || !ready) return false
+    const draft = latest.current
+    if (draft.key === baseline.current) return true
+    if (!draft.valid) {
+      setStatus('Complete the fields to save this change.')
+      return false
+    }
+    attempted.current = draft.key
+    setFailed(false)
+    setStatus('Saving...')
+    const operation = (async () => {
+      try {
+        await draft.save()
+        baseline.current = draft.key
+        if (mounted.current) setStatus('Saved.')
+        return true
+      } catch (cause) {
+        const message = cause instanceof Error ? cause.message : String((cause as { message?: string })?.message || 'Please try again.')
+        if (mounted.current) { setFailed(true); setStatus('Could not save: ' + message) }
+        return false
+      } finally {
+        inFlight.current = null
+        if (mounted.current) setRevision(value => value + 1)
+      }
+    })()
+    inFlight.current = operation
+    return operation
+  }
+  const flushLatest = useRef(flush)
+  flushLatest.current = flush
+  useEffect(() => {
+    if (!ready) return
+    if (baseline.current === null) { baseline.current = key; return }
+    if (key === baseline.current || key === attempted.current || inFlight.current) return
+    if (!valid) { setStatus('Complete the fields to save this change.'); return }
+    setStatus('Changes will save automatically...')
+    const timer = window.setTimeout(() => { void flushLatest.current() }, delay)
+    return () => window.clearTimeout(timer)
+  }, [ready, key, valid, delay, revision])
+  return { status, failed, flush }
+}
+
+function AutosaveStatus({ state }: { state: { status: string; failed: boolean; flush: () => Promise<boolean> } }) {
+  return <div className="mt-4 rounded-xl bg-gray-50 p-3" aria-live="polite">
+    <p className={state.failed ? 'text-sm text-red-600' : 'text-sm text-gray-600'}>{state.status}</p>
+    {state.failed && <button type="button" onClick={() => void state.flush()}
+      className="mt-2 rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white">Retry saving</button>}
+  </div>
+}
+
 export default function ProfilePage() {
   const router = useRouter()
 
@@ -1561,353 +1625,115 @@ export default function ProfilePage() {
   // UPLOAD PHOTO
   // ============================================
 
-  async function uploadPhoto() {
-    if (!photoFile) {
-      return null
+  const basicSaveBusy = useRef(false)
+  const lastBasicAttempt = useRef<{ key: string; file: File | null } | null>(null)
+  const [basicSaveError, setBasicSaveError] = useState('')
+
+  async function saveProfile(): Promise<boolean> {
+    if (basicSaveBusy.current || loading || !profile) return false
+
+    const snapshot = {
+      firstName: firstName.trim(),
+      lastName: lastName.trim(),
+      major: major.trim(),
+      academicYear: academicYear.trim(),
+      careerGoal: careerGoal.trim(),
+      bio: bio.trim(),
     }
+    const file = photoFile
+    // A photo can save independently while a required text field is being edited.
+    const validText = Boolean(snapshot.firstName && snapshot.lastName && snapshot.major && snapshot.academicYear)
+    if (!validText && !file) return false
 
-    setUploadingPhoto(true)
-    setError('')
-
-    const supabase =
-      createClient()
-
-    const {
-      data: { user },
-      error: userError,
-    } =
-      await supabase.auth.getUser()
-
-    if (
-      userError ||
-      !user
-    ) {
-      setError(
-        'You must be logged in.'
-      )
-
-      setUploadingPhoto(
-        false
-      )
-
-      router.push('/login')
-
-      return null
-    }
-
-    const fileExtension =
-      photoFile.name
-        .split('.')
-        .pop()
-        ?.toLowerCase() ||
-      'jpg'
-
-    const filePath =
-      `${user.id}/profile.${fileExtension}`
-
-    const {
-      error:
-        removeError,
-    } =
-      await supabase.storage
-        .from(
-          'profile-photos'
-        )
-        .remove([
-          `${user.id}/profile.jpg`,
-          `${user.id}/profile.jpeg`,
-          `${user.id}/profile.png`,
-          `${user.id}/profile.webp`,
-        ])
-
-    if (removeError) {
-      console.log(
-        'Could not remove previous photo:',
-        removeError.message
-      )
-    }
-
-    const {
-      error:
-        uploadError,
-    } =
-      await supabase.storage
-        .from(
-          'profile-photos'
-        )
-        .upload(
-          filePath,
-          photoFile,
-          {
-            upsert: true,
-            contentType:
-              photoFile.type,
-            cacheControl:
-              '0',
-          }
-        )
-
-    if (uploadError) {
-      setError(
-        `Could not upload photo: ${uploadError.message}`
-      )
-
-      setUploadingPhoto(
-        false
-      )
-
-      return null
-    }
-
-    const {
-      data:
-        publicUrlData,
-    } =
-      supabase.storage
-        .from(
-          'profile-photos'
-        )
-        .getPublicUrl(
-          filePath
-        )
-
-    const photoUrl =
-      `${publicUrlData.publicUrl}?v=${Date.now()}`
-
-    const {
-      error:
-        updateError,
-    } =
-      await supabase
-        .from('profiles')
-        .update({
-          profile_photo_url:
-            photoUrl,
-        })
-        .eq(
-          'id',
-          user.id
-        )
-
-    if (updateError) {
-      setError(
-        `Photo uploaded, but profile could not be updated: ${updateError.message}`
-      )
-
-      setUploadingPhoto(
-        false
-      )
-
-      return null
-    }
-
-    setProfile(
-      (current) =>
-        current
-          ? {
-              ...current,
-              profile_photo_url:
-                photoUrl,
-            }
-          : current
-    )
-
-    setPhotoPreview(
-      photoUrl
-    )
-
-    setPhotoFile(null)
-
-    setUploadingPhoto(
-      false
-    )
-
-    return photoUrl
-  }
-
-  // ============================================
-  // SAVE BASIC PROFILE
-  // ============================================
-
-  async function saveProfile() {
-    if (
-      saving ||
-      uploadingPhoto
-    ) {
-      return
-    }
-
-    setError('')
-    setSuccess('')
-
-    const trimmedFirstName =
-      firstName.trim()
-
-    const trimmedLastName =
-      lastName.trim()
-
-    const trimmedMajor =
-      major.trim()
-
-    if (!trimmedFirstName) {
-      setError(
-        'First name is required.'
-      )
-      return
-    }
-
-    if (!trimmedLastName) {
-      setError(
-        'Last name is required.'
-      )
-      return
-    }
-
-    if (!trimmedMajor) {
-      setError(
-        'Major is required.'
-      )
-      return
-    }
-
-    if (!academicYear) {
-      setError(
-        'Academic year is required.'
-      )
-      return
-    }
-
+    basicSaveBusy.current = true
     setSaving(true)
+    setBasicSaveError('')
+    let uploadedPath: string | null = null
+    let photoCommitted = false
+    const supabase = createClient()
 
-    const supabase =
-      createClient()
+    try {
+      const { data: { user }, error: userError } = await supabase.auth.getUser()
+      if (userError || !user) throw new Error('Please sign in again to save your changes.')
 
-    const {
-      data: { user },
-      error: userError,
-    } =
-      await supabase.auth.getUser()
-
-    if (
-      userError ||
-      !user
-    ) {
-      setError(
-        'You must be logged in.'
-      )
-
-      setSaving(false)
-
-      router.push('/login')
-
-      return
-    }
-
-    if (photoFile) {
-      const uploadedPhotoUrl =
-        await uploadPhoto()
-
-      if (
-        !uploadedPhotoUrl
-      ) {
-        setSaving(false)
-        return
-      }
-    }
-
-    const {
-      data,
-      error:
-        updateError,
-    } =
-      await supabase
-        .from('profiles')
-        .update({
-          first_name:
-            trimmedFirstName,
-          last_name:
-            trimmedLastName,
-          major:
-            trimmedMajor,
-          academic_year:
-            academicYear.trim() ||
-            null,
-          career_goal:
-            careerGoal.trim() ||
-            null,
-          bio:
-            bio.trim() ||
-            null,
-        })
-        .eq(
-          'id',
-          user.id
+      let photoUrl = profile.profile_photo_url || ''
+      if (file) {
+        setUploadingPhoto(true)
+        // Keep the previous photo intact until the new photo is committed.
+        uploadedPath = `${user.id}/profile-${crypto.randomUUID()}.jpg`
+        const { error: uploadError } = await supabase.storage.from('profile-photos').upload(
+          uploadedPath, file, { contentType: file.type, cacheControl: '3600', upsert: false }
         )
-        .select(`
-          id,
-          first_name,
-          last_name,
-          major,
-          academic_year,
-          bio,
-          career_goal,
-          profile_photo_url,
-          is_discoverable,
-          show_academic_info,
-          show_career_goal,
-          linkedin_url,
-          instagram_username,
-          snapchat_username,
-          youtube_url,
-          portfolio_url,
-          contact_email,
-          resume_url,
-          contact_visibility
-        `)
-        .single()
+        if (uploadError) throw uploadError
+        photoUrl = supabase.storage.from('profile-photos').getPublicUrl(uploadedPath).data.publicUrl
+      }
 
-    if (updateError) {
-      setError(
-        `Could not save profile: ${updateError.message}`
-      )
+      const updates = {
+        ...(validText ? {
+          first_name: snapshot.firstName,
+          last_name: snapshot.lastName,
+          major: snapshot.major,
+          academic_year: snapshot.academicYear,
+          career_goal: snapshot.careerGoal || null,
+          bio: snapshot.bio || null,
+        } : {}),
+        ...(file ? { profile_photo_url: photoUrl } : {}),
+      }
+      const { data, error: updateError } = await supabase.from('profiles')
+        .update(updates).eq('id', user.id).select('id').single()
+      if (updateError || !data) throw updateError || new Error('Profile update was not confirmed.')
+      photoCommitted = Boolean(file)
 
+      // Merge only the fields this operation saved; preserve other section updates.
+      setProfile(current => current ? { ...current, ...updates } : current)
+      setSavedBasicProfile(current => ({
+        ...current,
+        ...(validText ? snapshot : {}),
+        ...(file ? { photoUrl } : {}),
+      }))
+      if (file) {
+        setPhotoFile(current => current === file ? null : current)
+        // Do not overwrite a newer crop selected during this upload.
+        setPhotoPreview(current => current === photoPreview ? photoUrl : current)
+      }
+      return true
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String((cause as { message?: string })?.message || 'Unknown error')
+      setBasicSaveError(`Could not save changes: ${message}`)
+      if (uploadedPath && !photoCommitted) {
+        await supabase.storage.from('profile-photos').remove([uploadedPath])
+      }
+      return false
+    } finally {
+      basicSaveBusy.current = false
       setSaving(false)
-      return
+      setUploadingPhoto(false)
     }
-
-    setProfile(data)
-
-    if (
-      data.profile_photo_url
-    ) {
-      setPhotoPreview(
-        data.profile_photo_url
-      )
-    }
-
-    setSavedBasicProfile({
-      firstName:
-        data.first_name || '',
-      lastName:
-        data.last_name || '',
-      major:
-        data.major || '',
-      academicYear:
-        data.academic_year || '',
-      careerGoal:
-        data.career_goal || '',
-      bio:
-        data.bio || '',
-      photoUrl:
-        data.profile_photo_url || '',
-    })
-
-    setSuccess(
-      'Profile saved successfully.'
-    )
-
-    setSaving(false)
   }
+
+  const hasUnsavedBasicChanges =
+    firstName.trim() !== savedBasicProfile.firstName.trim() ||
+    lastName.trim() !== savedBasicProfile.lastName.trim() ||
+    major.trim() !== savedBasicProfile.major.trim() ||
+    academicYear.trim() !== savedBasicProfile.academicYear.trim() ||
+    careerGoal.trim() !== savedBasicProfile.careerGoal.trim() ||
+    bio.trim() !== savedBasicProfile.bio.trim() || Boolean(photoFile)
+
+  const basicDraftKey = JSON.stringify([firstName, lastName, major, academicYear, careerGoal, bio])
+  const saveBasicLatest = useRef(saveProfile)
+  saveBasicLatest.current = saveProfile
+
+  useEffect(() => {
+    if (loading || !profile || !hasUnsavedBasicChanges || saving) return
+    if (!photoFile && !(firstName.trim() && lastName.trim() && major.trim() && academicYear.trim())) return
+    if (lastBasicAttempt.current?.key === basicDraftKey && lastBasicAttempt.current.file === photoFile) return
+    const timer = window.setTimeout(() => {
+      lastBasicAttempt.current = { key: basicDraftKey, file: photoFile }
+      void saveBasicLatest.current()
+    }, photoFile ? 0 : 700)
+    return () => window.clearTimeout(timer)
+  }, [loading, profile, hasUnsavedBasicChanges, saving, basicDraftKey, photoFile,
+      firstName, lastName, major, academicYear])
 
   // ============================================
   // INTEREST HELPERS
@@ -3444,87 +3270,14 @@ export default function ProfilePage() {
   // ============================================
 
   async function saveMatchPreferences() {
-    if (
-      !currentUserId ||
-      savingPreferences
-    ) {
-      return
-    }
-
-    setError('')
-    setPreferencesMessage('')
+    if (!currentUserId) throw new Error('Please sign in again.')
+    const payload = { ...matchPreferences, user_id: currentUserId }
     setSavingPreferences(true)
-
-    const supabase =
-      createClient()
-
-    const payload = {
-      user_id:
-        currentUserId,
-      same_major:
-        matchPreferences.same_major,
-      similar_career_interests:
-        matchPreferences.similar_career_interests,
-      outside_major:
-        matchPreferences.outside_major,
-      upperclassmen:
-        matchPreferences.upperclassmen,
-      mentors:
-        matchPreferences.mentors,
-      project_collaborators:
-        matchPreferences.project_collaborators,
-      frequency:
-        matchPreferences.frequency,
-      match_style:
-        matchPreferences.match_style,
-    }
-
-    const {
-      data,
-      error:
-        upsertError,
-    } =
-      await supabase
-        .from(
-          'match_preferences'
-        )
-        .upsert(
-          payload,
-          {
-            onConflict:
-              'user_id',
-          }
-        )
-        .select(`
-          user_id,
-          same_major,
-          similar_career_interests,
-          outside_major,
-          upperclassmen,
-          mentors,
-          project_collaborators,
-          frequency,
-          match_style
-        `)
-        .single()
-
-    if (upsertError) {
-      setError(
-        `Could not save matching preferences: ${upsertError.message}`
-      )
-      setSavingPreferences(false)
-      return
-    }
-
-    setMatchPreferences(
-      data as MatchPreferences
-    )
-
-    setPreferencesMessage(
-      'Matching preferences saved.'
-    )
-
-    setSavingPreferences(false)
+    try {
+      const { data, error } = await createClient().from('match_preferences')
+        .upsert(payload, { onConflict: 'user_id' }).select('user_id').single()
+      if (error || !data) throw error || new Error('Update was not confirmed.')
+    } finally { setSavingPreferences(false) }
   }
 
   // ============================================
@@ -4067,283 +3820,45 @@ export default function ProfilePage() {
     setResumeFile(file)
   }
 
-  async function uploadResume(
-    userId: string
-  ) {
-    if (!resumeFile) {
-      return resumePath || null
-    }
-
+  async function saveResumeAutomatically() {
+    const file = resumeFile
+    if (!file || !currentUserId) return
+    const supabase = createClient()
+    const path = currentUserId + '/resume-' + crypto.randomUUID() + '.pdf'
+    let committed = false
     setUploadingResume(true)
-
-    const supabase =
-      createClient()
-
-    const filePath =
-      `${userId}/resume.pdf`
-
-    const {
-      error: uploadError,
-    } =
-      await supabase.storage
-        .from('resumes')
-        .upload(
-          filePath,
-          resumeFile,
-          {
-            upsert: true,
-            contentType:
-              'application/pdf',
-            cacheControl:
-              '0',
-          }
-        )
-
-    if (uploadError) {
-      setError(
-        `Could not upload resume: ${uploadError.message}`
-      )
-
-      setUploadingResume(false)
-      return null
-    }
-
-    setResumePath(filePath)
-    setResumeFile(null)
-    setUploadingResume(false)
-
-    return filePath
+    try {
+      const { error: uploadError } = await supabase.storage.from('resumes')
+        .upload(path, file, { contentType: 'application/pdf', upsert: false })
+      if (uploadError) throw uploadError
+      const { data, error } = await supabase.from('profiles').update({ resume_url: path })
+        .eq('id', currentUserId).select('id').single()
+      if (error || !data) throw error || new Error('Resume update was not confirmed.')
+      committed = true
+      setProfile(current => current ? { ...current, resume_url: path } : current)
+      setResumePath(path)
+      setResumeFile(current => current === file ? null : current)
+    } catch (error) {
+      if (!committed) await supabase.storage.from('resumes').remove([path])
+      throw error
+    } finally { setUploadingResume(false) }
   }
 
   async function saveLinksAndResume() {
-    if (
-      !currentUserId ||
-      savingLinks ||
-      uploadingResume ||
-      removingResume
-    ) {
-      return
-    }
-
-    setError('')
-    setLinksMessage('')
+    if (!currentUserId) throw new Error('Please sign in again.')
+    const links = profileLinks.filter(link => link.label.trim() || link.url.trim())
+      .map((link, index) => ({ label: link.label.trim(), url: normalizeProfileLinkUrl(link.url), sort_order: index }))
     setSavingLinks(true)
-
-    const supabase =
-      createClient()
-
-    const cleanedLinks =
-      profileLinks
-        .map(
-          (link, index) => ({
-            label:
-              link.label.trim(),
-            url:
-              normalizeProfileLinkUrl(
-                link.url
-              ),
-            sort_order:
-              index,
-          })
-        )
-        .filter(
-          (link) =>
-            link.label ||
-            link.url
-        )
-
-    const incompleteLink =
-      cleanedLinks.find(
-        (link) =>
-          !link.label ||
-          !link.url
-      )
-
-    if (incompleteLink) {
-      setError(
-        'Each social link needs both a label and a link.'
-      )
-
-      setSavingLinks(false)
-      return
-    }
-
-    const cleanedContactEmail =
-      contactEmail.trim()
-
-    if (
-      cleanedContactEmail &&
-      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(
-        cleanedContactEmail
-      )
-    ) {
-      setError(
-        'Please enter a valid contact email.'
-      )
-
-      setSavingLinks(false)
-      return
-    }
-
-    let savedResumePath =
-      resumePath || null
-
-    if (resumeFile) {
-      savedResumePath =
-        await uploadResume(
-          currentUserId
-        )
-
-      if (!savedResumePath) {
-        setSavingLinks(false)
-        return
-      }
-    }
-
-    const {
-      error: deleteLinksError,
-    } =
-      await supabase
-        .from('profile_links')
-        .delete()
-        .eq(
-          'user_id',
-          currentUserId
-        )
-
-    if (deleteLinksError) {
-      setError(
-        `Could not update profile links: ${deleteLinksError.message}`
-      )
-
-      setSavingLinks(false)
-      return
-    }
-
-    let savedLinks:
-      ProfileLink[] = []
-
-    if (cleanedLinks.length > 0) {
-      const {
-        data: insertedLinks,
-        error: insertLinksError,
-      } =
-        await supabase
-          .from('profile_links')
-          .insert(
-            cleanedLinks.map(
-              (link) => ({
-                user_id:
-                  currentUserId,
-                label:
-                  link.label,
-                url:
-                  link.url,
-                sort_order:
-                  link.sort_order,
-              })
-            )
-          )
-          .select(`
-            id,
-            label,
-            url,
-            sort_order
-          `)
-
-      if (insertLinksError) {
-        setError(
-          `Could not save profile links: ${insertLinksError.message}`
-        )
-
-        setSavingLinks(false)
-        return
-      }
-
-      savedLinks =
-        (insertedLinks ||
-          []) as ProfileLink[]
-    }
-
-    const {
-      data,
-      error: updateError,
-    } =
-      await supabase
-        .from('profiles')
-        .update({
-          contact_email:
-            cleanedContactEmail ||
-            null,
-          resume_url:
-            savedResumePath,
-          contact_visibility:
-            contactVisibility,
-        })
-        .eq(
-          'id',
-          currentUserId
-        )
-        .select(`
-          id,
-          first_name,
-          last_name,
-          major,
-          academic_year,
-          bio,
-          career_goal,
-          profile_photo_url,
-          is_discoverable,
-          show_academic_info,
-          show_career_goal,
-          linkedin_url,
-          instagram_username,
-          snapchat_username,
-          youtube_url,
-          portfolio_url,
-          contact_email,
-          resume_url,
-          contact_visibility
-        `)
-        .single()
-
-    if (updateError) {
-      setError(
-        `Could not save links and resume: ${updateError.message}`
-      )
-
-      setSavingLinks(false)
-      return
-    }
-
-    setProfile(
-      data as Profile
-    )
-
-    setProfileLinks(
-      savedLinks
-    )
-
-    setContactEmail(
-      data.contact_email ||
-      ''
-    )
-
-    setResumePath(
-      data.resume_url ||
-      ''
-    )
-
-    setContactVisibility(
-      data.contact_visibility ||
-      'connections'
-    )
-
-    setLinksMessage(
-      'Links and resume saved.'
-    )
-
-    setSavingLinks(false)
+    try {
+      const { error } = await createClient().rpc('save_profile_links_and_contact', {
+        p_links: links,
+        p_contact_email: contactEmail.trim() || null,
+        p_contact_visibility: contactVisibility,
+      })
+      if (error) throw error
+      const updates = { contact_email: contactEmail.trim() || null, contact_visibility: contactVisibility }
+      setProfile(current => current ? { ...current, ...updates } : current)
+    } finally { setSavingLinks(false) }
   }
 
   async function viewResume() {
@@ -4387,86 +3902,25 @@ export default function ProfilePage() {
   }
 
   async function removeResume() {
-    if (
-      !currentUserId ||
-      !resumePath ||
-      removingResume
-    ) {
-      return
-    }
-
-    const confirmed =
-      window.confirm(
-        'Remove your uploaded resume?'
-      )
-
-    if (!confirmed) {
-      return
-    }
-
-    setError('')
-    setLinksMessage('')
+    if (!currentUserId || !resumePath || removingResume || uploadingResume || resumeFile) return
+    if (!window.confirm('Remove your uploaded resume?')) return
+    const oldPath = resumePath
     setRemovingResume(true)
-
-    const supabase =
-      createClient()
-
-    const {
-      error: storageError,
-    } =
-      await supabase.storage
-        .from('resumes')
-        .remove([
-          resumePath,
-        ])
-
-    if (storageError) {
-      setError(
-        `Could not remove resume: ${storageError.message}`
-      )
-
-      setRemovingResume(false)
-      return
-    }
-
-    const {
-      error: updateError,
-    } =
-      await supabase
-        .from('profiles')
-        .update({
-          resume_url: null,
-        })
-        .eq(
-          'id',
-          currentUserId
-        )
-
-    if (updateError) {
-      setError(
-        `Resume was removed from storage, but your profile could not be updated: ${updateError.message}`
-      )
-
-      setRemovingResume(false)
-      return
-    }
-
-    setProfile(
-      (current) =>
-        current
-          ? {
-              ...current,
-              resume_url: null,
-            }
-          : current
-    )
-
-    setResumePath('')
-    setResumeFile(null)
-    setLinksMessage(
-      'Resume removed.'
-    )
-    setRemovingResume(false)
+    setLinksMessage('')
+    try {
+      const supabase = createClient()
+      const { data, error } = await supabase.from('profiles').update({ resume_url: null })
+        .eq('id', currentUserId).select('id').single()
+      if (error || !data) throw error || new Error('Resume removal was not confirmed.')
+      setProfile(current => current ? { ...current, resume_url: null } : current)
+      setResumePath('')
+      setLinksMessage('Resume removed.')
+      // Clear the profile first; a failed storage cleanup must not break its link.
+      const { error: cleanupError } = await supabase.storage.from('resumes').remove([oldPath])
+      if (cleanupError) console.error('Resume storage cleanup failed:', cleanupError.message)
+    } catch (cause) {
+      setError('Could not remove resume: ' + String((cause as { message?: string })?.message || cause))
+    } finally { setRemovingResume(false) }
   }
 
   // ============================================
@@ -4474,92 +3928,36 @@ export default function ProfilePage() {
   // ============================================
 
   async function savePrivacySettings() {
-    if (
-      !currentUserId ||
-      savingPrivacy
-    ) {
-      return
-    }
-
-    setError('')
-    setPrivacyMessage('')
+    if (!currentUserId) throw new Error('Please sign in again.')
+    const updates = { is_discoverable: isDiscoverable, show_academic_info: showAcademicInfo, show_career_goal: showCareerGoal }
     setSavingPrivacy(true)
-
-    const supabase =
-      createClient()
-
-    const {
-      data,
-      error:
-        updateError,
-    } =
-      await supabase
-        .from('profiles')
-        .update({
-          is_discoverable:
-            isDiscoverable,
-          show_academic_info:
-            showAcademicInfo,
-          show_career_goal:
-            showCareerGoal,
-        })
-        .eq(
-          'id',
-          currentUserId
-        )
-        .select(`
-          id,
-          first_name,
-          last_name,
-          major,
-          academic_year,
-          bio,
-          career_goal,
-          profile_photo_url,
-          is_discoverable,
-          show_academic_info,
-          show_career_goal,
-          linkedin_url,
-          instagram_username,
-          snapchat_username,
-          youtube_url,
-          portfolio_url,
-          contact_email,
-          resume_url,
-          contact_visibility
-        `)
-        .single()
-
-    if (updateError) {
-      setError(
-        `Could not save privacy settings: ${updateError.message}`
-      )
-      setSavingPrivacy(false)
-      return
-    }
-
-    setProfile(
-      data as Profile
-    )
-
-    setIsDiscoverable(
-      data.is_discoverable
-    )
-
-    setShowAcademicInfo(
-      data.show_academic_info
-    )
-
-    setShowCareerGoal(
-      data.show_career_goal
-    )
-
-    setPrivacyMessage(
-      'Privacy settings saved.'
-    )
-
-    setSavingPrivacy(false)
+    try {
+      const { data, error } = await createClient().from('profiles').update(updates)
+        .eq('id', currentUserId).select('id').single()
+      if (error || !data) throw error || new Error('Update was not confirmed.')
+      setProfile(current => current ? { ...current, ...updates } : current)
+    } finally { setSavingPrivacy(false) }
   }
+
+  const preferencesAutosave = useSectionAutosave(
+    !loading && !loadingPreferences && Boolean(currentUserId),
+    JSON.stringify(matchPreferences), true, saveMatchPreferences, 200)
+  const privacyAutosave = useSectionAutosave(
+    !loading && Boolean(currentUserId),
+    JSON.stringify([isDiscoverable, showAcademicInfo, showCareerGoal]), true, savePrivacySettings, 200)
+  const completeLinks = profileLinks.filter(link => link.label.trim() || link.url.trim())
+  const linksValid = completeLinks.every(link => {
+    if (!link.label.trim() || !link.url.trim()) return false
+    try { const url = new URL(normalizeProfileLinkUrl(link.url)); return ['http:', 'https:'].includes(url.protocol) && url.hostname.includes('.') } catch { return false }
+  }) && (!contactEmail.trim() || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contactEmail.trim()))
+  const linksAutosave = useSectionAutosave(
+    !loading && Boolean(currentUserId),
+    JSON.stringify([profileLinks.map(({ label, url }) => ({ label, url })), contactEmail, contactVisibility]),
+    linksValid, saveLinksAndResume)
+  const resumeAutosave = useSectionAutosave(
+    !loading && Boolean(currentUserId) && !removingResume,
+    resumeFile ? JSON.stringify([resumeFile.name, resumeFile.size, resumeFile.lastModified]) : '',
+    true, saveResumeAutomatically, 0)
 
   // ============================================
   // LOADING
@@ -4618,27 +4016,6 @@ export default function ProfilePage() {
       ) * 100
     )
 
-  const hasUnsavedBasicChanges =
-    firstName !==
-      savedBasicProfile.firstName ||
-    lastName !==
-      savedBasicProfile.lastName ||
-    major !==
-      savedBasicProfile.major ||
-    academicYear !==
-      savedBasicProfile.academicYear ||
-    careerGoal !==
-      savedBasicProfile.careerGoal ||
-    bio !==
-      savedBasicProfile.bio ||
-    Boolean(photoFile)
-
-  const canSaveBasicProfile =
-    requiredFieldsCompleted === 4 &&
-    hasUnsavedBasicChanges &&
-    !saving &&
-    !uploadingPhoto
-
   // ============================================
   // PAGE
   // ============================================
@@ -4666,14 +4043,18 @@ export default function ProfilePage() {
 
           <button
             type="button"
-            onClick={() =>
-              router.push(
-                '/dashboard'
-              )
-            }
-            className="rounded-full px-4 py-2 text-sm font-medium text-gray-500 transition hover:bg-gray-100 hover:text-black"
+            disabled={saving}
+            onClick={async () => {
+              if (hasUnsavedBasicChanges && !(await saveProfile())) return
+              if (!(await preferencesAutosave.flush())) return
+              if (!(await privacyAutosave.flush())) return
+              if (!(await linksAutosave.flush())) return
+              if (!(await resumeAutosave.flush())) return
+              router.push('/dashboard')
+            }}
+            className="rounded-full px-4 py-2 text-sm font-medium text-gray-500 transition hover:bg-gray-100 hover:text-black disabled:opacity-40"
           >
-            Done
+            {saving ? 'Saving...' : 'Done'}
           </button>
 
         </div>
@@ -4798,7 +4179,7 @@ export default function ProfilePage() {
 
                   {hasUnsavedBasicChanges && (
                     <span className="rounded-full bg-amber-50 px-3 py-1.5 text-xs font-semibold text-amber-700">
-                      Unsaved changes
+                      {saving ? 'Saving...' : basicSaveError ? 'Save failed — retry below' : 'Changes will save automatically'}
                     </span>
                   )}
 
@@ -5087,43 +4468,19 @@ export default function ProfilePage() {
 
             </div>
 
-            {/* SAVE */}
-
-            <div className="rounded-2xl bg-gray-50 p-4">
-
-              <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-
-                <p className="text-sm font-semibold text-gray-700">
-                  {hasUnsavedBasicChanges
-                    ? 'You have unsaved changes.'
-                    : 'Your basic information is up to date.'}
-                </p>
-
-                <span className="text-xs font-medium text-gray-400">
-                  {requiredFieldsCompleted}/4 required
-                </span>
-
-              </div>
-
-              <button
-                type="button"
-                onClick={
-                  saveProfile
-                }
-                disabled={
-                  saving ||
-                  uploadingPhoto
-                }
-                className="w-full rounded-xl bg-black px-5 py-4 font-semibold text-white transition hover:-translate-y-0.5 hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                {saving ||
-                uploadingPhoto
-                  ? 'Saving changes...'
-                  : hasUnsavedBasicChanges
-                    ? 'Save Basic Information'
-                    : 'Save Basic Information'}
-              </button>
-
+            <div className="rounded-2xl bg-gray-50 p-4" aria-live="polite">
+              <p className="text-sm font-semibold text-gray-700">
+                {saving ? 'Saving changes...' : basicSaveError ? basicSaveError : hasUnsavedBasicChanges
+                  ? (requiredFieldsCompleted === 4 ? 'Changes will save automatically.' : 'Complete the required fields to save your basic information.')
+                  : 'All basic information changes saved.'}
+              </p>
+              <p className="mt-1 text-xs text-gray-500">Photos save after confirmation. Text edits save after you pause typing.</p>
+              {basicSaveError && (
+                <button type="button" onClick={() => void saveProfile()} disabled={saving}
+                  className="mt-3 rounded-xl bg-black px-4 py-3 text-sm font-semibold text-white disabled:opacity-40">
+                  Retry saving
+                </button>
+              )}
             </div>
 
           </div>
@@ -6936,20 +6293,7 @@ export default function ProfilePage() {
 
               <div className="border-t border-gray-100 pt-6">
 
-                <button
-                  type="button"
-                  onClick={
-                    saveMatchPreferences
-                  }
-                  disabled={
-                    savingPreferences
-                  }
-                  className="w-full rounded-xl bg-black px-5 py-4 font-semibold text-white transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {savingPreferences
-                    ? 'Saving preferences...'
-                    : 'Save Matching Preferences'}
-                </button>
+                <AutosaveStatus state={preferencesAutosave} />
 
               </div>
 
@@ -7638,6 +6982,8 @@ export default function ProfilePage() {
                   className="block w-full text-sm text-gray-500 file:mr-4 file:rounded-xl file:border-0 file:bg-white file:px-4 file:py-2.5 file:text-sm file:font-semibold file:text-gray-700 file:shadow-sm hover:file:bg-gray-100 disabled:opacity-50"
                 />
 
+                <AutosaveStatus state={resumeAutosave} />
+
                 {resumeFile && (
                   <p className="mt-3 text-sm font-medium text-gray-700">
                     Selected: {resumeFile.name}
@@ -7677,7 +7023,7 @@ export default function ProfilePage() {
                           removeResume
                         }
                         disabled={
-                          removingResume
+                          removingResume || uploadingResume || Boolean(resumeFile)
                         }
                         className="rounded-xl border border-red-200 px-3 py-2 text-xs font-semibold text-red-600 transition hover:bg-red-50 disabled:opacity-50"
                       >
@@ -7695,23 +7041,7 @@ export default function ProfilePage() {
 
             </div>
 
-            <button
-              type="button"
-              onClick={
-                saveLinksAndResume
-              }
-              disabled={
-                savingLinks ||
-                uploadingResume ||
-                removingResume
-              }
-              className="w-full rounded-xl bg-black px-5 py-4 font-semibold text-white transition hover:-translate-y-0.5 hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              {savingLinks ||
-              uploadingResume
-                ? 'Saving...'
-                : 'Save Links & Resume'}
-            </button>
+            <AutosaveStatus state={linksAutosave} />
 
           </div>
 
@@ -7953,20 +7283,7 @@ export default function ProfilePage() {
 
           </div>
 
-          <button
-            type="button"
-            onClick={
-              savePrivacySettings
-            }
-            disabled={
-              savingPrivacy
-            }
-            className="mt-5 w-full rounded-xl bg-black px-5 py-4 font-semibold text-white transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {savingPrivacy
-              ? 'Saving privacy settings...'
-              : 'Save Privacy Settings'}
-          </button>
+          <AutosaveStatus state={privacyAutosave} />
 
         </section>
 

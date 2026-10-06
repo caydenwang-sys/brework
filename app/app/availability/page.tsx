@@ -496,11 +496,11 @@ export default function AvailabilityPage() {
           <button
             type="button"
             onClick={() =>
-              router.push('/dashboard')
+              router.push('/settings')
             }
             className="rounded-full px-4 py-2 text-sm font-medium text-gray-500 transition hover:bg-gray-100 hover:text-black"
           >
-            Home
+            Back
           </button>
 
         </div>

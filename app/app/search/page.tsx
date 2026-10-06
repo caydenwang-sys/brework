@@ -4,10 +4,101 @@ import {
   useEffect,
   useMemo,
   useState,
+  useRef,
 } from 'react'
+import { createPortal } from 'react-dom'
 import { useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 import BottomNav from '../components/BottomNav'
+
+function ExpandableProfilePhoto({ src, name }: { src: string; name: string }) {
+  const trigger = useRef<HTMLButtonElement>(null)
+  const closeButton = useRef<HTMLButtonElement>(null)
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [origin, setOrigin] = useState<{ top: number; left: number; size: number } | null>(null)
+  const [expanded, setExpanded] = useState(false)
+
+  function close() {
+    if (timer.current) return
+    setExpanded(false)
+    timer.current = setTimeout(() => {
+      setOrigin(null)
+      timer.current = null
+      trigger.current?.focus({ preventScroll: true })
+    }, window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 220)
+  }
+
+  useEffect(() => {
+    if (!origin) return
+    const frame = requestAnimationFrame(() => setExpanded(true))
+    closeButton.current?.focus({ preventScroll: true })
+    function onKey(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        event.stopPropagation()
+        close()
+      }
+      if (event.key === 'Tab') {
+        event.preventDefault()
+        closeButton.current?.focus()
+      }
+    }
+    document.addEventListener('keydown', onKey, true)
+    return () => {
+      cancelAnimationFrame(frame)
+      document.removeEventListener('keydown', onKey, true)
+    }
+  }, [origin])
+
+  useEffect(() => () => {
+    if (timer.current) clearTimeout(timer.current)
+  }, [])
+
+  return (
+    <>
+      <button
+        ref={trigger}
+        type="button"
+        aria-label={`Enlarge ${name}'s profile photo`}
+        onClick={() => {
+          const rect = trigger.current?.getBoundingClientRect()
+          if (rect) setOrigin({ top: rect.top, left: rect.left, size: rect.width })
+        }}
+        className="h-full w-full rounded-full focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-blue-500"
+      >
+        <img src={src} alt={`${name} profile`} className="h-full w-full rounded-full object-cover" />
+      </button>
+      {origin && createPortal(
+        <div role="dialog" aria-modal="true" aria-label={`${name}'s profile photo`} className="fixed inset-0 z-[100]">
+          <button
+            ref={closeButton}
+            type="button"
+            aria-label="Close enlarged profile photo"
+            onClick={close}
+            className="absolute inset-0 h-full w-full motion-reduce:transition-none"
+            style={{ backgroundColor: expanded ? 'rgba(0,0,0,0.8)' : 'rgba(0,0,0,0)', transition: 'background-color 220ms ease' }}
+          />
+          <img
+            src={src}
+            alt={`${name} profile`}
+            className="pointer-events-none fixed rounded-full object-cover shadow-2xl motion-reduce:transition-none"
+            style={{
+              top: expanded ? '50%' : origin.top,
+              left: expanded ? '50%' : origin.left,
+              width: expanded ? 'min(80vw, 60vh, 420px)' : origin.size,
+              height: expanded ? 'min(80vw, 60vh, 420px)' : origin.size,
+              transform: expanded ? 'translate(-50%, -50%)' : 'translate(0, 0)',
+              transition: 'top 220ms ease, left 220ms ease, width 220ms ease, height 220ms ease, transform 220ms ease',
+            }}
+          />
+          <p className="pointer-events-none absolute inset-x-0 bottom-[max(2rem,env(safe-area-inset-bottom))] text-center text-sm" style={{ color: '#fff' }}>
+            Tap anywhere to close
+          </p>
+        </div>, document.body
+      )}
+    </>
+  )
+}
 
 type Profile = {
   id: string
@@ -3800,12 +3891,9 @@ export default function SearchPage() {
 
                     {profile.profile_photo_url ? (
 
-                      <img
-                        src={
-                          profile.profile_photo_url
-                        }
-                        alt={`${fullName} profile`}
-                        className="h-full w-full object-cover"
+                      <ExpandableProfilePhoto
+                        src={profile.profile_photo_url}
+                        name={fullName}
                       />
 
                     ) : (

@@ -9,6 +9,8 @@ import {
 import "./globals.css";
 import GlobalMessageListener from "./components/GlobalMessageListener";
 import ThemeController from "./components/ThemeController";
+import PushRegistration from "./components/PushRegistration";
+import PullToRefresh from "./components/PullToRefresh";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -44,6 +46,8 @@ export default function RootLayout({
       <body className="min-h-full flex flex-col">
         <ThemeController />
         <GlobalMessageListener />
+        <PushRegistration />
+        <PullToRefresh />
 
         {children}
       </body>

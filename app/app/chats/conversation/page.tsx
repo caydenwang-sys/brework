@@ -85,6 +85,12 @@ export default function ConversationPage() {
   // AUTO-SCROLL REF
   // ============================================
 
+  const messageScrollRef = useRef<HTMLDivElement | null>(null)
+  const messageContentRef = useRef<HTMLDivElement | null>(null)
+  const followMessagesRef = useRef(true)
+  const initialScrollRef = useRef(true)
+  const lastMessageIdRef = useRef<Message['id'] | null>(null)
+
   const messagesEndRef =
     useRef<HTMLDivElement | null>(null)
 
@@ -95,10 +101,10 @@ export default function ConversationPage() {
   function scrollToBottom(
     behavior: ScrollBehavior = 'smooth'
   ) {
-    messagesEndRef.current?.scrollIntoView({
-      behavior,
-      block: 'end',
-    })
+    const container = messageScrollRef.current
+    if (!container) return
+    followMessagesRef.current = true
+    container.scrollTo({ top: container.scrollHeight, behavior })
   }
 
   // ============================================
@@ -384,19 +390,40 @@ export default function ConversationPage() {
   // ============================================
 
   useEffect(() => {
-    if (loading) {
-      return
-    }
+    initialScrollRef.current = true
+    followMessagesRef.current = true
+    lastMessageIdRef.current = null
+  }, [matchId])
 
-    const timeout =
-      setTimeout(() => {
-        scrollToBottom('smooth')
-      }, 50)
+  useEffect(() => {
+    if (loading) return
+    const lastMessage = messages[messages.length - 1]
+    const newLastMessage = lastMessage?.id !== lastMessageIdRef.current
+    const firstLoad = initialScrollRef.current
+    const shouldFollow = firstLoad || followMessagesRef.current ||
+      (newLastMessage && lastMessage?.sender_id === currentUserId)
+    lastMessageIdRef.current = lastMessage?.id ?? null
+    initialScrollRef.current = false
+    if (!shouldFollow || (!newLastMessage && !firstLoad)) return
+    const frame = requestAnimationFrame(() => scrollToBottom('auto'))
+    return () => cancelAnimationFrame(frame)
+  }, [messages, loading, currentUserId])
 
-    return () => {
-      clearTimeout(timeout)
-    }
-  }, [messages, loading])
+  useEffect(() => {
+    if (loading) return
+    const container = messageScrollRef.current
+    const content = messageContentRef.current
+    if (!container || !content || typeof ResizeObserver === 'undefined') return
+    let frame = 0
+    const observer = new ResizeObserver(() => {
+      if (!followMessagesRef.current) return
+      cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(() => scrollToBottom('auto'))
+    })
+    observer.observe(container)
+    observer.observe(content)
+    return () => { observer.disconnect(); cancelAnimationFrame(frame) }
+  }, [loading, matchId])
 
   // ============================================
   // REALTIME MESSAGE LISTENER
@@ -782,6 +809,8 @@ export default function ConversationPage() {
       return
     }
 
+    followMessagesRef.current = true
+
     setMessages(
       (currentMessages) => {
 
@@ -994,9 +1023,9 @@ export default function ConversationPage() {
       .toUpperCase()
 
   return (
-    <main className="min-h-screen bg-[#f7f7f5]">
+    <main className="flex h-[100dvh] min-h-0 flex-col overflow-hidden bg-[#f7f7f5]">
 
-      <header className="sticky top-0 z-30 border-b border-gray-200/70 bg-white/95 backdrop-blur">
+      <header className="relative z-30 shrink-0 border-b border-gray-200/70 bg-white/95 backdrop-blur">
 
         <div className="mx-auto flex max-w-3xl items-center gap-4 px-5 py-4 sm:px-6">
 
@@ -1030,7 +1059,16 @@ export default function ConversationPage() {
 
       </header>
 
-      <div className="mx-auto flex min-h-[calc(100vh-73px)] max-w-3xl flex-col px-5 pb-32 pt-6 sm:px-6">
+      <div
+        ref={messageScrollRef}
+        className="min-h-0 flex-1 overflow-y-auto overscroll-y-contain"
+        onScroll={() => {
+          const container = messageScrollRef.current
+          if (container) followMessagesRef.current =
+            container.scrollHeight - container.scrollTop - container.clientHeight < 100
+        }}
+      >
+      <div ref={messageContentRef} className="mx-auto flex min-h-full w-full max-w-3xl flex-col px-5 py-6 sm:px-6">
 
         {error && (
           <div className="mb-5 rounded-2xl border border-red-100 bg-red-50 p-4 text-sm text-red-600">
@@ -1091,7 +1129,7 @@ export default function ConversationPage() {
                   >
 
                     <div
-                      className={`rounded-2xl px-4 py-3 text-sm leading-relaxed ${
+                      className={`min-w-0 [overflow-wrap:anywhere] rounded-2xl px-4 py-3 text-sm leading-relaxed ${
                         isMine
                           ? 'rounded-br-md bg-black text-white'
                           : 'rounded-bl-md bg-white text-gray-900 shadow-sm'
@@ -1174,6 +1212,7 @@ export default function ConversationPage() {
 
         )}
 
+      </div>
       </div>
 
       {/* ======================================== */}
@@ -1342,11 +1381,11 @@ export default function ConversationPage() {
 
       )}
 
-      <div className="fixed bottom-0 left-0 right-0 z-20 border-t border-gray-200 bg-white/95 backdrop-blur">
+      <div className="relative z-20 shrink-0 border-t border-gray-200 bg-white/95 backdrop-blur" style={{ paddingBottom: 'env(safe-area-inset-bottom, 0px)' }}>
 
         <form
           onSubmit={sendMessage}
-          className="mx-auto flex max-w-3xl items-end gap-3 px-5 py-4 sm:px-6"
+          className="mx-auto grid w-full min-w-0 max-w-3xl grid-cols-[minmax(0,1fr)_auto] items-end gap-2 px-3 py-4 sm:gap-3 sm:px-6"
         >
 
           <input
@@ -1359,7 +1398,7 @@ export default function ConversationPage() {
             }
             placeholder={`Message ${firstName}...`}
             disabled={sending}
-            className="min-w-0 flex-1 rounded-2xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm outline-none transition placeholder:text-gray-400 focus:border-gray-400 focus:bg-white"
+            className="block w-full min-w-0 rounded-2xl border border-gray-200 bg-gray-50 px-3 py-3 text-base outline-none transition placeholder:text-gray-400 focus:border-gray-400 focus:bg-white"
           />
 
           <button
@@ -1368,7 +1407,7 @@ export default function ConversationPage() {
               sending ||
               !newMessage.trim()
             }
-            className="rounded-2xl bg-black px-5 py-3 text-sm font-bold text-white transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-40"
+            className="whitespace-nowrap rounded-2xl bg-black px-4 py-3 text-sm font-bold text-white transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-40"
           >
             {sending
               ? 'Sending...'

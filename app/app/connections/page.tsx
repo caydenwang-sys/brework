@@ -102,6 +102,7 @@ export default function ConnectionsPage() {
   >([])
 
   const [matches, setMatches] = useState<Match[]>([])
+  const [searchQuery, setSearchQuery] = useState('')
 
   const [loading, setLoading] = useState(true)
   const [actionLoading, setActionLoading] = useState<number | null>(null)
@@ -164,6 +165,39 @@ export default function ConnectionsPage() {
   const [reportSubmitted, setReportSubmitted] =
     useState(false)
 
+  useEffect(() => {
+    if (openMenuId === null) return
+
+    function dismissOutside(event: PointerEvent) {
+      const target = event.target
+      if (!(target instanceof Element) ||
+          !target.closest(`[data-connection-menu="${openMenuId}"]`)) {
+        setOpenMenuId(null)
+      }
+    }
+
+    function dismissWithEscape(event: KeyboardEvent) {
+      if (event.key === 'Escape') setOpenMenuId(null)
+    }
+
+    document.addEventListener('pointerdown', dismissOutside)
+    document.addEventListener('keydown', dismissWithEscape)
+    return () => {
+      document.removeEventListener('pointerdown', dismissOutside)
+      document.removeEventListener('keydown', dismissWithEscape)
+    }
+  }, [openMenuId])
+
+  const searchWords = searchQuery.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean)
+  function matchesSearch(connection: ConnectionWithProfile) {
+    const person = connection.person
+    const searchable = [getName(person), person?.major, person?.academic_year]
+      .filter(Boolean).join(' ').toLocaleLowerCase()
+    return searchWords.every(word => searchable.includes(word))
+  }
+  const filteredConnections = connections.filter(matchesSearch)
+  const filteredRequests = pendingRequests.filter(matchesSearch)
+
   async function loadConnections() {
     setLoading(true)
     setError('')
@@ -180,10 +214,8 @@ export default function ConnectionsPage() {
       return
     }
 
-    const {
-      data: connectionData,
-      error: connectionsError,
-    } = await supabase
+    const [connectionResult, matchResult] = await Promise.all([
+      supabase
       .from('connections')
       .select(
         'id, sender_id, receiver_id, status, created_at'
@@ -193,7 +225,22 @@ export default function ConnectionsPage() {
       )
       .order('created_at', {
         ascending: false,
-      })
+      }),
+      supabase
+      .from('matches')
+      .select(`
+        id,
+        user_1_id,
+        user_2_id,
+        status
+      `)
+      .or(
+        `user_1_id.eq.${user.id},user_2_id.eq.${user.id}`
+      )
+      .eq('status', 'active'),
+    ])
+    const { data: connectionData, error: connectionsError } = connectionResult
+    const { data: matchData, error: matchesError } = matchResult
 
     if (connectionsError) {
       setError(
@@ -213,7 +260,7 @@ export default function ConnectionsPage() {
         connection.receiver_id === user.id
     )
 
-    const otherUserIds = (connectionData || []).map(
+    const otherUserIds = [...accepted, ...pending].map(
       (connection) =>
         connection.sender_id === user.id
           ? connection.receiver_id
@@ -253,6 +300,8 @@ export default function ConnectionsPage() {
       profileData = data || []
     }
 
+    const profilesById = new Map(profileData.map(profile => [profile.id, profile]))
+
     const acceptedWithProfiles: ConnectionWithProfile[] =
       accepted.map((connection) => {
         const otherUserId =
@@ -263,9 +312,7 @@ export default function ConnectionsPage() {
         return {
           ...connection,
           person:
-            profileData.find(
-              (profile) => profile.id === otherUserId
-            ) || null,
+            profilesById.get(otherUserId) || null,
         }
       })
 
@@ -273,31 +320,12 @@ export default function ConnectionsPage() {
       pending.map((connection) => ({
         ...connection,
         person:
-          profileData.find(
-            (profile) =>
-              profile.id === connection.sender_id
-          ) || null,
+          profilesById.get(connection.sender_id) || null,
       }))
 
     // ============================================
     // LOAD ACTIVE MATCHES FOR MESSAGING
     // ============================================
-
-    const {
-      data: matchData,
-      error: matchesError,
-    } = await supabase
-      .from('matches')
-      .select(`
-        id,
-        user_1_id,
-        user_2_id,
-        status
-      `)
-      .or(
-        `user_1_id.eq.${user.id},user_2_id.eq.${user.id}`
-      )
-      .eq('status', 'active')
 
     if (matchesError) {
       setError(
@@ -1074,7 +1102,7 @@ export default function ConnectionsPage() {
                 Network
               </p>
 
-              {pendingRequests.length > 0 && (
+              {filteredRequests.length > 0 && (
                 <span className="rounded-full bg-black px-2.5 py-1 text-xs font-bold text-white">
                   {pendingRequests.length} new
                 </span>
@@ -1109,6 +1137,36 @@ export default function ConnectionsPage() {
           </div>
         )}
 
+        <div className="mt-6">
+          <label htmlFor="connection-search" className="mb-2 block text-sm font-semibold">
+            Search connections
+          </label>
+          <div className="flex items-center gap-2">
+            <input
+              id="connection-search"
+              type="search"
+              value={searchQuery}
+              onChange={event => {
+                setSearchQuery(event.target.value)
+                setOpenMenuId(null)
+              }}
+              placeholder="Search by name or major"
+              className="block w-full min-w-0 rounded-2xl border border-gray-200 bg-white px-4 py-3 text-base outline-none focus:ring-2 focus:ring-blue-500"
+            />
+            {searchQuery && (
+              <button type="button" onClick={() => setSearchQuery('')}
+                className="shrink-0 rounded-xl px-3 py-3 text-sm font-semibold">
+                Clear
+              </button>
+            )}
+          </div>
+          {searchQuery.trim() && (
+            <p role="status" className="mt-2 text-sm text-gray-500">
+              {filteredConnections.length} connections and {filteredRequests.length} requests found
+            </p>
+          )}
+        </div>
+
         {/* Pending Requests */}
         {pendingRequests.length > 0 && (
           <section className="mt-10">
@@ -1126,14 +1184,14 @@ export default function ConnectionsPage() {
               </div>
 
               <span className="text-sm font-semibold text-gray-400">
-                {pendingRequests.length}
+                {filteredRequests.length}
               </span>
 
             </div>
 
             <div className="mt-5 space-y-4">
 
-              {pendingRequests.map((connection) => {
+              {filteredRequests.map((connection) => {
                 const person = connection.person
                 const isLoading =
                   actionLoading === connection.id
@@ -1322,10 +1380,19 @@ export default function ConnectionsPage() {
               </button>
 
             </div>
+          ) : filteredConnections.length === 0 ? (
+            <div className="mt-5 rounded-3xl border border-gray-200/70 bg-white p-8 text-center">
+              <h3 className="font-semibold">No connections match your search</h3>
+              <p className="mt-2 text-sm text-gray-500">Try another name or clear your search.</p>
+              <button type="button" onClick={() => setSearchQuery('')}
+                className="mt-4 rounded-xl border border-gray-200 px-4 py-3 font-semibold">
+                Clear search
+              </button>
+            </div>
           ) : (
             <div className="mt-5 space-y-4">
 
-              {connections.map((connection) => {
+              {filteredConnections.map((connection) => {
                 const person = connection.person
 
                 if (!person) return null
@@ -1336,7 +1403,7 @@ export default function ConnectionsPage() {
                 return (
                   <div
                     key={connection.id}
-                    className="rounded-3xl border border-gray-200/70 bg-white p-5 shadow-sm transition hover:-translate-y-0.5 hover:shadow-md sm:p-6"
+                    className={`relative rounded-3xl border border-gray-200/70 bg-white p-5 shadow-sm transition hover:shadow-md sm:p-6 ${openMenuId === connection.id ? 'z-30' : 'z-0'}`}
                   >
 
                     <div className="flex flex-col gap-5 sm:flex-row sm:items-center">
@@ -1428,7 +1495,7 @@ export default function ConnectionsPage() {
                           Schedule Coffee Chat
                         </button>
 
-                        <div className="relative">
+                        <div className="relative" data-connection-menu={connection.id}>
 
                           <button
                             type="button"
@@ -1443,6 +1510,8 @@ export default function ConnectionsPage() {
                             }
                             className="flex h-full min-h-[44px] w-full items-center justify-center rounded-xl border border-gray-200 bg-white px-4 text-lg font-bold text-gray-500 transition hover:bg-gray-50 hover:text-black sm:w-auto"
                             aria-label={`More options for ${name}`}
+                            aria-expanded={openMenuId === connection.id}
+                            aria-controls={`connection-menu-${connection.id}`}
                           >
                             ⋯
                           </button>
@@ -1450,7 +1519,7 @@ export default function ConnectionsPage() {
                           {openMenuId ===
                             connection.id && (
 
-                            <div className="fixed bottom-28 left-5 right-5 z-[60] w-auto sm:absolute sm:bottom-full sm:left-auto sm:right-0 sm:mb-2 sm:w-56 overflow-hidden rounded-2xl border border-gray-200 bg-white p-2 shadow-xl">
+                            <div id={`connection-menu-${connection.id}`} className="absolute bottom-full right-0 z-40 mb-2 w-56 max-w-full overflow-hidden rounded-2xl border border-gray-200 bg-white p-2 shadow-xl">
 
                               <button
                                 type="button"

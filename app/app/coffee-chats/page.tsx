@@ -1,6 +1,6 @@
 'use client'
 
-import { Suspense, useEffect, useState } from 'react'
+import { Suspense, useEffect, useState, useRef } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import BottomNav from '../components/BottomNav'
 import {
@@ -35,6 +35,39 @@ type CoffeeChat = {
   otherUser: Profile | null
 }
 
+function pacificToday() {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(new Date())
+  const value = (name: string) => parts.find(part => part.type === name)?.value || ''
+  return `${value('year')}-${value('month')}-${value('day')}`
+}
+
+// Meetings use campus wall-clock times. Resolve Pacific DST rather than the device timezone.
+function pacificTimestamp(date: string, time: string) {
+  const [year, month, day] = date.split('-').map(Number)
+  const [hour, minute] = time.split(':').map(Number)
+  const wallTime = Date.UTC(year, month - 1, day, hour, minute)
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
+  })
+  let instant = wallTime
+  for (let step = 0; step < 4; step++) {
+    const parts = formatter.formatToParts(new Date(instant))
+    const value = (name: string) => Number(parts.find(part => part.type === name)?.value)
+    const displayed = Date.UTC(value('year'), value('month') - 1, value('day'), value('hour'), value('minute'))
+    if (displayed === wallTime) return instant
+    instant += wallTime - displayed
+  }
+  return NaN
+}
+
+function proposalSnapshot(chat: CoffeeChat) {
+  return { scheduled_date: chat.scheduled_date, start_time: chat.start_time,
+    end_time: chat.end_time, location: chat.location, proposed_by: chat.proposed_by }
+}
+
 type ViewMode =
   | 'list'
   | 'calendar'
@@ -66,6 +99,13 @@ function CoffeeChatsPageContent() {
 
   const [respondingId, setRespondingId] =
     useState<number | null>(null)
+
+  const [counterChat, setCounterChat] = useState<CoffeeChat | null>(null)
+  const [counterDate, setCounterDate] = useState(pacificToday)
+  const [counterStart, setCounterStart] = useState('')
+  const [counterDuration, setCounterDuration] = useState(30)
+  const [counterLocation, setCounterLocation] = useState('')
+  const requestLock = useRef(false)
 
   const [currentUserId, setCurrentUserId] =
     useState('')
@@ -352,30 +392,8 @@ function CoffeeChatsPageContent() {
   }
 
   function isUpcoming(chat: CoffeeChat) {
-    const [
-      year,
-      month,
-      day,
-    ] = chat.scheduled_date
-      .split('-')
-      .map(Number)
-
-    const [
-      hours,
-      minutes,
-    ] = chat.start_time
-      .split(':')
-      .map(Number)
-
-    const dateTime = new Date(
-      year,
-      month - 1,
-      day,
-      hours,
-      minutes
-    )
-
-    return dateTime >= new Date()
+    if (!chat.scheduled_date || !chat.start_time) return false
+    return pacificTimestamp(chat.scheduled_date, chat.start_time) >= Date.now()
   }
 
   function getChatName(
@@ -528,87 +546,74 @@ function CoffeeChatsPageContent() {
   // RESPOND TO COFFEE CHAT REQUEST
   // ============================================
 
-  async function respondToCoffeeChatRequest(
-    chat: CoffeeChat,
-    response: 'accepted' | 'declined'
-  ) {
-    if (
-      respondingId !== null ||
-      !currentUserId
-    ) {
-      return
-    }
-
-    if (
-      chat.status !== 'pending' ||
-      chat.proposed_by === currentUserId
-    ) {
-      return
-    }
-
-    const supabase = createClient()
-
+  async function respondToCoffeeChatRequest(chat: CoffeeChat, response: 'accepted' | 'declined') {
+    if (requestLock.current || !currentUserId || chat.status !== 'pending' || chat.proposed_by === currentUserId) return
+    requestLock.current = true
     setRespondingId(chat.id)
     setError('')
     setSuccess('')
-
-    const newStatus =
-      response === 'accepted'
-        ? 'scheduled'
-        : 'declined'
-
-    const {
-      error: updateError,
-    } = await supabase
-      .from('meetings')
-      .update({
-        status: newStatus,
-        responded_by: currentUserId,
-        responded_at:
-          new Date().toISOString(),
+    try {
+      const supabase = createClient()
+      const { error: updateError } = await supabase.rpc('brework_respond_coffee_chat', {
+        p_meeting_id: chat.id, p_expected: proposalSnapshot(chat), p_response: response,
       })
-      .eq('id', chat.id)
-      .eq('match_id', chat.match_id)
-      .eq('status', 'pending')
-
-    if (updateError) {
-      console.error(
-        'Could not respond to coffee chat request:',
-        updateError
-      )
-
-      setError(
-        `Could not ${response === 'accepted' ? 'accept' : 'decline'} this coffee chat request. Please try again.`
-      )
-
+      if (updateError) throw updateError
+      await loadCoffeeChats()
+      setSuccess(response === 'accepted'
+        ? 'Coffee chat confirmed. It is now on both Brework calendars.'
+        : 'Coffee chat request declined.')
+    } catch (cause) {
+      setError(cause && typeof cause === 'object' && 'message' in cause
+        ? String(cause.message) : 'Could not save your response. Please try again.')
+    } finally {
+      requestLock.current = false
       setRespondingId(null)
+    }
+  }
+
+  function openCounterProposal(chat: CoffeeChat) {
+    if (requestLock.current) return
+    setCounterChat(chat)
+    setCounterDate(isUpcoming(chat) ? chat.scheduled_date : pacificToday())
+    setCounterStart(chat.start_time?.slice(0, 5) || '')
+    setCounterDuration(30)
+    setCounterLocation(chat.location || '')
+    setError('')
+    setSuccess('')
+  }
+
+  async function sendCounterProposal() {
+    if (!counterChat || requestLock.current) return
+    const [hours, minutes] = counterStart.split(':').map(Number)
+    const end = hours * 60 + minutes + counterDuration
+    const instant = pacificTimestamp(counterDate, counterStart)
+    if (!counterDate || !counterStart || !Number.isFinite(instant) || instant <= Date.now() || end >= 1440) {
+      setError('Choose a valid future Pacific time that finishes before midnight.')
       return
     }
-
-    setCoffeeChats(
-      (currentChats) =>
-        currentChats.map(
-          (currentChat) =>
-            currentChat.id === chat.id
-              ? {
-                  ...currentChat,
-                  status: newStatus,
-                  responded_by:
-                    currentUserId,
-                  responded_at:
-                    new Date().toISOString(),
-                }
-              : currentChat
-        )
-    )
-
-    setSuccess(
-      response === 'accepted'
-        ? 'Coffee chat accepted. It is now confirmed and has been added to your upcoming chats.'
-        : 'Coffee chat request declined.'
-    )
-
-    setRespondingId(null)
+    const endTime = `${String(Math.floor(end / 60)).padStart(2, '0')}:${String(end % 60).padStart(2, '0')}:00`
+    requestLock.current = true
+    setRespondingId(counterChat.id)
+    setError('')
+    setSuccess('')
+    try {
+      const supabase = createClient()
+      const { error: saveError } = await supabase.rpc('brework_counter_coffee_chat', {
+        p_meeting_id: counterChat.id, p_expected: proposalSnapshot(counterChat),
+        p_date: counterDate, p_start: `${counterStart}:00`, p_end: endTime,
+        p_location: counterLocation.trim() || null,
+      })
+      if (saveError) throw saveError
+      setCounterChat(null)
+      await loadCoffeeChats()
+      setSuccess('New time sent. Your connection will need to accept it before the chat is confirmed.')
+    } catch (cause) {
+      setError(cause && typeof cause === 'object' && 'message' in cause
+        ? String(cause.message) : 'Could not suggest a new time. Please try again.')
+    } finally {
+      requestLock.current = false
+      setRespondingId(null)
+    }
   }
 
   // ============================================
@@ -768,9 +773,11 @@ function CoffeeChatsPageContent() {
     coffeeChats.filter(
       (chat) =>
         chat.status === 'pending' &&
-        chat.proposed_by !== currentUserId &&
-        isUpcoming(chat)
+        chat.proposed_by !== null &&
+        chat.proposed_by !== currentUserId
     )
+
+  const pendingOutgoingChats = coffeeChats.filter(chat => chat.status === 'pending' && chat.proposed_by === currentUserId)
 
   const upcomingChats =
     coffeeChats.filter(
@@ -1006,7 +1013,7 @@ function CoffeeChatsPageContent() {
                             <div className="rounded-2xl bg-gray-50 p-3.5">
 
                               <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-gray-400">
-                                Time
+                                Time (Pacific)
                               </p>
 
                               <p className="mt-2 text-sm font-semibold text-gray-900">
@@ -1058,8 +1065,7 @@ function CoffeeChatsPageContent() {
                           )
                         }
                         disabled={
-                          respondingId ===
-                          chat.id
+                          respondingId !== null
                         }
                         className="rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm font-semibold text-gray-700 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
                       >
@@ -1077,8 +1083,7 @@ function CoffeeChatsPageContent() {
                           )
                         }
                         disabled={
-                          respondingId ===
-                          chat.id
+                          respondingId !== null
                         }
                         className="rounded-xl bg-black px-4 py-3 text-sm font-semibold text-white transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-50"
                       >
@@ -1087,6 +1092,17 @@ function CoffeeChatsPageContent() {
                           : 'Accept'}
                       </button>
 
+                    </div>
+                    <div className="grid grid-cols-2 gap-3 border-t border-gray-100 p-4 sm:px-6">
+                      <button type="button" disabled={respondingId !== null}
+                        onClick={() => openCounterProposal(chat)}
+                        className="rounded-xl border border-gray-200 px-3 py-3 text-sm font-semibold disabled:opacity-50">
+                        Suggest another time
+                      </button>
+                      <button type="button" onClick={() => router.push(`/chats/conversation?matchId=${chat.match_id}`)}
+                        className="rounded-xl border border-gray-200 px-3 py-3 text-sm font-semibold">
+                        Discuss in chat
+                      </button>
                     </div>
 
                   </div>
@@ -1098,6 +1114,26 @@ function CoffeeChatsPageContent() {
 
           </section>
 
+        )}
+
+        {pendingOutgoingChats.length > 0 && (
+          <section className="mb-8">
+            <h2 className="text-2xl font-bold">Waiting for a response</h2>
+            <div className="mt-4 space-y-3">
+              {pendingOutgoingChats.map(chat => (
+                <div key={chat.id} className="rounded-2xl border border-gray-200 bg-white p-5">
+                  <p className="font-semibold">{getChatName(chat)}</p>
+                  <p className="mt-2 text-sm text-gray-500">{formatDate(chat.scheduled_date)} · {formatTime(chat.start_time)} Pacific time</p>
+                  {chat.location && <p className="mt-1 text-sm text-gray-500">{chat.location}</p>}
+                  <p className="mt-2 text-xs text-gray-500">{isUpcoming(chat) ? 'Waiting for them to accept or suggest another time.' : 'This proposed time has passed. Cancel this request and suggest a new time.'}</p>
+                  <div className="mt-4 flex flex-wrap gap-3">
+                    <button type="button" onClick={() => router.push(`/chats/conversation?matchId=${chat.match_id}`)} className="rounded-xl border border-gray-200 px-4 py-2 text-sm font-semibold">Message</button>
+                    <button type="button" disabled={cancellingId !== null} onClick={() => cancelCoffeeChat(chat)} className="rounded-xl border border-gray-200 px-4 py-2 text-sm font-semibold">Cancel request</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
         )}
 
         {/* ============================================
@@ -1523,7 +1559,7 @@ function CoffeeChatsPageContent() {
                               </span>
 
                               <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-gray-400">
-                                Time
+                                Time (Pacific)
                               </p>
 
                             </div>
@@ -1922,6 +1958,39 @@ function CoffeeChatsPageContent() {
 
         </div>
 
+      )}
+
+      {counterChat && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center overflow-y-auto bg-black/50 p-4"
+          onClick={() => { if (!requestLock.current) setCounterChat(null) }}>
+          <div role="dialog" aria-modal="true" aria-labelledby="counter-title"
+            className="max-h-[85dvh] w-full max-w-md overflow-y-auto rounded-3xl bg-white p-6"
+            onClick={event => event.stopPropagation()}>
+            <div className="flex items-start justify-between gap-3">
+              <h2 id="counter-title" className="text-2xl font-bold">Suggest another time</h2>
+              <button type="button" disabled={respondingId !== null} onClick={() => setCounterChat(null)} aria-label="Close time proposal" className="rounded-full px-3 py-2">×</button>
+            </div>
+            <p className="mt-2 text-sm text-gray-500">With {getChatName(counterChat)}. All times are Pacific time (UCSD).</p>
+            {error && <p role="alert" className="mt-4 text-sm text-red-600">{error}</p>}
+            <form onSubmit={event => { event.preventDefault(); void sendCounterProposal() }}>
+              <fieldset disabled={respondingId !== null} className="mt-5 space-y-4">
+                <div><label htmlFor="counter-date" className="block text-sm font-semibold">Date</label>
+                  <input id="counter-date" type="date" required min={pacificToday()} value={counterDate} onChange={event => setCounterDate(event.target.value)} className="mt-2 block w-full min-w-0 rounded-xl border border-gray-200 bg-white px-3 py-3 text-base" /></div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="min-w-0"><label htmlFor="counter-time" className="block text-sm font-semibold">Start time</label>
+                    <input id="counter-time" type="time" required value={counterStart} onChange={event => setCounterStart(event.target.value)} className="mt-2 block w-full min-w-0 rounded-xl border border-gray-200 bg-white px-3 py-3 text-base" /></div>
+                  <div><label htmlFor="counter-duration" className="block text-sm font-semibold">Duration</label>
+                    <select id="counter-duration" value={counterDuration} onChange={event => setCounterDuration(Number(event.target.value))} className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-3 py-3 text-base">
+                      {[15, 30, 45, 60].map(minutes => <option key={minutes} value={minutes}>{minutes} minutes</option>)}
+                    </select></div>
+                </div>
+                <div><label htmlFor="counter-place" className="block text-sm font-semibold">Place or link (optional)</label>
+                  <input id="counter-place" type="text" maxLength={150} value={counterLocation} onChange={event => setCounterLocation(event.target.value)} className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-3 py-3 text-base" /></div>
+                <button type="submit" className="w-full rounded-xl bg-black px-4 py-3 font-semibold text-white">{respondingId !== null ? 'Sending…' : 'Send new time'}</button>
+              </fieldset>
+            </form>
+          </div>
+        </div>
       )}
 
       {/* BOTTOM NAV */}

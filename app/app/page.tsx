@@ -7,6 +7,7 @@ import { createClient } from '@/lib/supabase/client'
 
 export default function HomePage() {
   const router = useRouter()
+  const [error, setError] = useState('')
 
   const [checkingSession, setCheckingSession] =
     useState(true)
@@ -26,7 +27,17 @@ export default function HomePage() {
       }
 
       if (session) {
-        router.replace('/dashboard')
+        const { data: profile, error: profileError } = await supabase
+          .from('profiles')
+          .select('onboarding_completed_at')
+          .eq('id', session.user.id)
+          .maybeSingle()
+        if (!mounted) return
+        if (profileError) {
+          setError('Could not check your account setup. Please try again.')
+          return
+        }
+        router.replace(profile?.onboarding_completed_at ? '/dashboard' : '/onboarding')
         return
       }
 
@@ -43,7 +54,17 @@ export default function HomePage() {
   if (checkingSession) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-white">
-        <div className="h-8 w-8 animate-spin rounded-full border-2 border-gray-300 border-t-black" />
+        {error ? (
+          <div className="px-6 text-center">
+            <p role="alert" className="text-sm text-red-600">{error}</p>
+            <button type="button" onClick={() => window.location.reload()}
+              className="mt-4 rounded-xl bg-black px-5 py-3 font-semibold text-white">
+              Try again
+            </button>
+          </div>
+        ) : (
+          <div className="h-8 w-8 animate-spin rounded-full border-2 border-gray-300 border-t-black" />
+        )}
       </main>
     )
   }
@@ -71,7 +92,7 @@ export default function HomePage() {
 
           {/* Badge */}
           <div className="mb-6 inline-block rounded-full bg-gray-100 px-4 py-2 text-sm font-medium text-gray-700">
-            Built for UCSD students
+            Built for college students
           </div>
 
           {/* Main heading */}
@@ -85,7 +106,7 @@ export default function HomePage() {
 
           {/* Description */}
           <p className="mx-auto mt-6 max-w-2xl text-lg leading-8 text-gray-600 md:text-xl">
-            Brework helps you discover UCSD students who share your
+            Brework helps you discover students who share your
             interests, career goals, projects, and ambitions.
           </p>
 

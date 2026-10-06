@@ -1,8 +1,39 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { useRouter } from 'next/navigation'
+
+function PrivacySwitch({ checked, label, onToggle, disabled }: {
+  checked: boolean
+  label: string
+  disabled: boolean
+  onToggle: () => void
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      onClick={onToggle}
+      disabled={disabled}
+      className="disabled:cursor-wait disabled:opacity-70 flex min-h-11 shrink-0 items-center gap-2 rounded-xl px-1 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-blue-500"
+    >
+      <span className="w-7 text-xs font-bold">{checked ? 'On' : 'Off'}</span>
+      <span
+        aria-hidden="true"
+        className="relative block h-8 w-14 rounded-full border-2 transition-colors"
+        style={{ backgroundColor: checked ? '#15803d' : '#64748b', borderColor: checked ? '#15803d' : '#64748b' }}
+      >
+        <span
+          className="absolute top-0.5 block h-6 w-6 rounded-full shadow-sm transition-transform"
+          style={{ backgroundColor: '#ffffff', left: '2px', transform: checked ? 'translateX(24px)' : 'translateX(0)' }}
+        />
+      </span>
+    </button>
+  )
+}
 
 export default function PrivacySettingsPage() {
   const router = useRouter()
@@ -13,6 +44,8 @@ export default function PrivacySettingsPage() {
 
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  const [ready, setReady] = useState(false)
+  const saveLock = useRef(false)
 
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
@@ -56,53 +89,54 @@ export default function PrivacySettingsPage() {
       setShowAcademicInfo(data.show_academic_info)
       setShowCareerGoal(data.show_career_goal)
 
+      setReady(true)
       setLoading(false)
     }
 
     loadPrivacySettings()
   }, [router])
 
-  async function savePrivacySettings() {
-    if (saving) {
-      return
-    }
-
+  async function togglePrivacy(field: 'is_discoverable' | 'show_academic_info' | 'show_career_goal') {
+    if (saveLock.current || !ready) return
+    saveLock.current = true
     setSaving(true)
     setError('')
     setSuccess('')
 
-    const supabase = createClient()
+    const previous = field === 'is_discoverable' ? isDiscoverable
+      : field === 'show_academic_info' ? showAcademicInfo : showCareerGoal
+    const setValue = field === 'is_discoverable' ? setIsDiscoverable
+      : field === 'show_academic_info' ? setShowAcademicInfo : setShowCareerGoal
+    const next = !previous
+    setValue(next)
 
-    const {
-      data: { user },
-      error: userError,
-    } = await supabase.auth.getUser()
+    try {
+      const supabase = createClient()
+      const { data: { user }, error: userError } = await supabase.auth.getUser()
+      if (userError || !user) {
+        setValue(previous)
+        router.push('/login')
+        return
+      }
 
-    if (userError || !user) {
+      const { error: saveError } = await supabase
+        .from('profiles')
+        .update({ [field]: next })
+        .eq('id', user.id)
+        .select('id')
+        .single()
+
+      if (saveError) throw saveError
+      setSuccess('Saved automatically.')
+    } catch (cause) {
+      setValue(previous)
+      const message = cause && typeof cause === 'object' && 'message' in cause
+        ? String(cause.message) : 'Please check your connection and try again.'
+      setError(`Could not save privacy settings: ${message} Your previous setting was restored. Tap the switch to try again.`)
+    } finally {
+      saveLock.current = false
       setSaving(false)
-      router.push('/login')
-      return
     }
-
-    const { error: updateError } = await supabase
-      .from('profiles')
-      .update({
-        is_discoverable: isDiscoverable,
-        show_academic_info: showAcademicInfo,
-        show_career_goal: showCareerGoal,
-      })
-      .eq('id', user.id)
-
-    if (updateError) {
-      setError(
-        `Could not save privacy settings: ${updateError.message}`
-      )
-      setSaving(false)
-      return
-    }
-
-    setSuccess('Privacy settings saved.')
-    setSaving(false)
   }
 
   if (loading) {
@@ -123,6 +157,7 @@ export default function PrivacySettingsPage() {
 
           <button
             type="button"
+            disabled={saving}
             onClick={() => router.push('/settings')}
             className="text-xl font-bold tracking-tight"
           >
@@ -131,6 +166,7 @@ export default function PrivacySettingsPage() {
 
           <button
             type="button"
+            disabled={saving}
             onClick={() => router.push('/settings')}
             className="rounded-full px-4 py-2 text-sm font-medium text-gray-500 transition hover:bg-gray-100 hover:text-black"
           >
@@ -155,22 +191,22 @@ export default function PrivacySettingsPage() {
         </p>
 
         {error && (
-          <div className="mt-6 rounded-2xl border border-red-100 bg-red-50 p-4 text-sm text-red-600">
+          <div role="alert" className="mt-6 rounded-2xl border border-red-100 bg-red-50 p-4 text-sm text-red-600">
             {error}
           </div>
         )}
 
         {success && (
-          <div className="mt-6 rounded-2xl border border-green-100 bg-green-50 p-4 text-sm text-green-700">
+          <div role="status" className="mt-6 rounded-2xl border border-green-100 bg-green-50 p-4 text-sm text-green-700">
             {success}
           </div>
         )}
 
         <section className="mt-10 rounded-3xl border border-gray-200/70 bg-white p-6 shadow-sm">
 
-          <div className="flex items-center justify-between gap-6">
+          <div className="flex items-center justify-between gap-3">
 
-            <div>
+            <div className="min-w-0 flex-1">
               <h2 className="font-semibold">
                 Appear in Discover
               </h2>
@@ -180,35 +216,20 @@ export default function PrivacySettingsPage() {
               </p>
             </div>
 
-            <button
-              type="button"
-              onClick={() => {
-                setIsDiscoverable((current) => !current)
-                setSuccess('')
-                setError('')
-              }}
-              className={`relative h-7 w-12 shrink-0 rounded-full transition ${
-                isDiscoverable
-                  ? 'bg-black'
-                  : 'bg-gray-300'
-              }`}
-            >
-              <span
-                className={`absolute top-1 h-5 w-5 rounded-full bg-white transition ${
-                  isDiscoverable
-                    ? 'left-6'
-                    : 'left-1'
-                }`}
-              />
-            </button>
+            <PrivacySwitch
+              checked={isDiscoverable}
+              label="Appear in Discover"
+              disabled={saving || !ready}
+              onToggle={() => { void togglePrivacy('is_discoverable') }}
+            />
 
           </div>
 
           <div className="my-6 border-t border-gray-100" />
 
-          <div className="flex items-center justify-between gap-6">
+          <div className="flex items-center justify-between gap-3">
 
-            <div>
+            <div className="min-w-0 flex-1">
               <h2 className="font-semibold">
                 Show academic information
               </h2>
@@ -218,35 +239,20 @@ export default function PrivacySettingsPage() {
               </p>
             </div>
 
-            <button
-              type="button"
-              onClick={() => {
-                setShowAcademicInfo((current) => !current)
-                setSuccess('')
-                setError('')
-              }}
-              className={`relative h-7 w-12 shrink-0 rounded-full transition ${
-                showAcademicInfo
-                  ? 'bg-black'
-                  : 'bg-gray-300'
-              }`}
-            >
-              <span
-                className={`absolute top-1 h-5 w-5 rounded-full bg-white transition ${
-                  showAcademicInfo
-                    ? 'left-6'
-                    : 'left-1'
-                }`}
-              />
-            </button>
+            <PrivacySwitch
+              checked={showAcademicInfo}
+              label="Show academic information"
+              disabled={saving || !ready}
+              onToggle={() => { void togglePrivacy('show_academic_info') }}
+            />
 
           </div>
 
           <div className="my-6 border-t border-gray-100" />
 
-          <div className="flex items-center justify-between gap-6">
+          <div className="flex items-center justify-between gap-3">
 
-            <div>
+            <div className="min-w-0 flex-1">
               <h2 className="font-semibold">
                 Show career interests
               </h2>
@@ -256,42 +262,20 @@ export default function PrivacySettingsPage() {
               </p>
             </div>
 
-            <button
-              type="button"
-              onClick={() => {
-                setShowCareerGoal((current) => !current)
-                setSuccess('')
-                setError('')
-              }}
-              className={`relative h-7 w-12 shrink-0 rounded-full transition ${
-                showCareerGoal
-                  ? 'bg-black'
-                  : 'bg-gray-300'
-              }`}
-            >
-              <span
-                className={`absolute top-1 h-5 w-5 rounded-full bg-white transition ${
-                  showCareerGoal
-                    ? 'left-6'
-                    : 'left-1'
-                }`}
-              />
-            </button>
+            <PrivacySwitch
+              checked={showCareerGoal}
+              label="Show career interests"
+              disabled={saving || !ready}
+              onToggle={() => { void togglePrivacy('show_career_goal') }}
+            />
 
           </div>
 
         </section>
 
-        <button
-          type="button"
-          onClick={savePrivacySettings}
-          disabled={saving}
-          className="mt-6 w-full rounded-2xl bg-black px-5 py-4 font-semibold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {saving
-            ? 'Saving...'
-            : 'Save privacy settings'}
-        </button>
+        <p role="status" aria-live="polite" className="mt-6 text-sm text-gray-500">
+          {saving ? 'Saving…' : !error && !success ? 'Changes save automatically.' : ''}
+        </p>
 
       </div>
 
