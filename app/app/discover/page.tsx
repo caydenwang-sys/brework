@@ -27,8 +27,39 @@ type ScoredProfile = {
   reasons: string[]
 }
 
+type MatchPreferences = {
+  same_major: boolean
+  similar_career_interests: boolean
+  outside_major: boolean
+  upperclassmen: boolean
+  mentors: boolean
+  project_collaborators: boolean
+  match_style: string
+}
+
+function normalize(value: string | null | undefined) {
+  return (value || '').trim().toLowerCase()
+}
+
+function academicRank(value: string | null | undefined) {
+  const year = normalize(value)
+  if (/graduate|masters|master|phd|doctoral/.test(year)) return 5
+  if (/senior|fourth|4th/.test(year)) return 4
+  if (/junior|third|3rd/.test(year)) return 3
+  if (/sophomore|second|2nd/.test(year)) return 2
+  if (/freshman|first|1st/.test(year)) return 1
+  return 0
+}
+
+function projectKeywords(text: string) {
+  const ignored = new Set(['about', 'after', 'also', 'been', 'being', 'build', 'building', 'have', 'into', 'more', 'other', 'project', 'projects', 'that', 'their', 'them', 'there', 'these', 'this', 'through', 'using', 'want', 'were', 'what', 'when', 'which', 'with', 'work', 'working', 'would', 'your'])
+  return new Set((text.toLowerCase().match(/[a-z0-9]{4,}/g) || []).filter(word => !ignored.has(word)))
+}
+
 export default function DiscoverPage() {
   const router = useRouter()
+  const [round, setRound] = useState(0)
+  const [possibleScore, setPossibleScore] = useState(6)
 
   const [profiles, setProfiles] =
     useState<ScoredProfile[]>([])
@@ -53,7 +84,10 @@ export default function DiscoverPage() {
   // ============================================
 
   useEffect(() => {
+    let cancelled = false
     async function loadProfiles() {
+      setLoading(true)
+      setError('')
       const supabase = createClient()
 
       const {
@@ -67,6 +101,28 @@ export default function DiscoverPage() {
       }
 
       setUserId(user.id)
+
+      const { data: preferences, error: preferencesError } = await supabase
+        .from('match_preferences')
+        .select('same_major,similar_career_interests,outside_major,upperclassmen,mentors,project_collaborators,match_style')
+        .eq('user_id', user.id)
+        .maybeSingle()
+      if (cancelled) return
+      if (preferencesError) {
+        setError(`Could not load matching preferences: ${preferencesError.message}`)
+        setLoading(false)
+        return
+      }
+      const preference: MatchPreferences = {
+        same_major: false,
+        similar_career_interests: false,
+        outside_major: false,
+        upperclassmen: false,
+        mentors: false,
+        project_collaborators: false,
+        match_style: 'similar',
+        ...preferences,
+      }
 
       // ========================================
       // GET YOUR PROFILE
@@ -190,35 +246,24 @@ export default function DiscoverPage() {
       // GET OTHER STUDENTS
       // ========================================
 
-      const {
-        data: allProfiles,
-        error: profilesError,
-      } = await supabase
-        .from('profiles')
-        .select(`
-          id,
-          first_name,
-          last_name,
-          major,
-          academic_year,
-          bio,
-          career_goal,
-          profile_photo_url,
-          is_discoverable,
-          show_academic_info,
-          show_career_goal,
-          resume_url
-        `)
-        .neq('id', user.id)
-        .eq('is_discoverable', true)
-
-      if (profilesError) {
-        setError(
-          `Could not load students: ${profilesError.message}`
-        )
-
-        setLoading(false)
-        return
+      // Page through the full eligible pool instead of stopping at the API row limit.
+      const allProfiles: Profile[] = []
+      for (let offset = 0; ; offset += 1000) {
+        const { data: page, error: profilesError } = await supabase
+          .from('profiles')
+          .select('id,first_name,last_name,major,academic_year,bio,career_goal,profile_photo_url,is_discoverable,show_academic_info,show_career_goal,resume_url')
+          .neq('id', user.id)
+          .eq('is_discoverable', true)
+          .order('id')
+          .range(offset, offset + 999)
+        if (cancelled) return
+        if (profilesError) {
+          setError(`Could not load students: ${profilesError.message}`)
+          setLoading(false)
+          return
+        }
+        allProfiles.push(...(page || []))
+        if (!page?.length || page.length < 1000) break
       }
 
       const availableProfiles =
@@ -231,93 +276,175 @@ export default function DiscoverPage() {
       // SCORE PROFILES
       // ========================================
 
-      const scoredProfiles: ScoredProfile[] =
-        availableProfiles.map((profile) => {
-          let score = 0
-          const reasons: string[] = []
+      const projectText = new Map<string, string>()
+      if (preference.project_collaborators) {
+        // Projects are readable under the existing policies; preferences stay private.
+        const ids = [user.id, ...availableProfiles.map(profile => profile.id)]
+        for (let base = 0; base < ids.length; base += 100) {
+          for (let offset = 0; ; offset += 1000) {
+            const { data: page, error: projectError } = await supabase
+              .from('projects')
+              .select('id,user_id,title,description')
+              .in('user_id', ids.slice(base, base + 100))
+              .order('id')
+              .range(offset, offset + 999)
+            if (cancelled) return
+            if (projectError) {
+              setError(`Could not load project interests: ${projectError.message}`)
+              setLoading(false)
+              return
+            }
+            for (const project of page || []) {
+              projectText.set(project.user_id, `${projectText.get(project.user_id) || ''} ${project.title || ''} ${project.description || ''}`)
+            }
+            if (!page?.length || page.length < 1000) break
+          }
+        }
+      }
+      const myProjectWords = projectKeywords(projectText.get(user.id) || '')
+      const toggles = [preference.same_major, preference.similar_career_interests,
+        preference.outside_major, preference.upperclassmen, preference.mentors,
+        preference.project_collaborators]
+      const maximum = 6 + toggles.filter(Boolean).length * 3
+      setPossibleScore(maximum)
 
-          // Same career goal
-          if (
-            myProfile.career_goal &&
-            profile.career_goal &&
-            myProfile.career_goal
-              .trim()
-              .toLowerCase() ===
-              profile.career_goal
-                .trim()
-                .toLowerCase()
-          ) {
+      const scoredProfiles: ScoredProfile[] = availableProfiles.map(profile => {
+        let score = 0
+        const reasons: string[] = []
+        // Hidden academic/career details do not contribute revealing match reasons.
+        const majorKnown = profile.show_academic_info && !!normalize(myProfile.major) && !!normalize(profile.major)
+        const careerKnown = profile.show_career_goal && !!normalize(myProfile.career_goal) && !!normalize(profile.career_goal)
+        const sameMajor = majorKnown && normalize(myProfile.major) === normalize(profile.major)
+        const sameCareer = careerKnown && normalize(myProfile.career_goal) === normalize(profile.career_goal)
+        const sameYear = profile.show_academic_info && !!normalize(myProfile.academic_year)
+          && normalize(myProfile.academic_year) === normalize(profile.academic_year)
+        const outsideMajor = majorKnown && !sameMajor
+        const otherCareer = careerKnown && !sameCareer
+        const myYear = academicRank(myProfile.academic_year)
+        const theirYear = profile.show_academic_info ? academicRank(profile.academic_year) : 0
+        const upperclassman = theirYear >= 3
+        const moreExperienced = myYear > 0 && theirYear > myYear
+
+        if (preference.match_style === 'different') {
+          if (outsideMajor) score += 3
+          if (otherCareer) score += 3
+        } else if (preference.match_style === 'balanced') {
+          if (sameMajor) score += 2
+          if (sameCareer) score += 2
+          if (outsideMajor || otherCareer) score += 2
+        } else {
+          if (sameCareer) score += 3
+          if (sameMajor) score += 2
+          if (sameYear) score += 1
+        }
+        if (sameMajor) reasons.push('Same major')
+        if (sameCareer) reasons.push('Same career interest')
+        if (sameYear) reasons.push('Same academic year')
+        if (preference.same_major && sameMajor) score += 3
+        if (preference.similar_career_interests && sameCareer) score += 3
+        if (preference.outside_major && outsideMajor) {
+          score += 3
+          reasons.push('Outside your major')
+        }
+        if (preference.upperclassmen && upperclassman) {
+          score += 3
+          reasons.push('Upperclassman')
+        }
+        if (preference.mentors && moreExperienced && sameCareer) {
+          score += 3
+          reasons.push('More academic experience in your career interest')
+        }
+        if (preference.project_collaborators) {
+          const theirWords = projectKeywords(projectText.get(profile.id) || '')
+          const sharedProject = [...myProjectWords].some(word => theirWords.has(word))
+          if (sharedProject) {
             score += 3
-
-            if (profile.show_career_goal) {
-              reasons.push(
-                'Same career interest'
-              )
-            }
+            reasons.push('Shared project interests')
           }
+        }
+        if (preference.match_style === 'different' && (outsideMajor || otherCareer)) {
+          reasons.push('A new perspective')
+        }
+        return { profile, score, reasons }
+      })
 
-          // Same major
-          if (
-            myProfile.major &&
-            profile.major &&
-            myProfile.major
-              .trim()
-              .toLowerCase() ===
-              profile.major
-                .trim()
-                .toLowerCase()
-          ) {
-            score += 2
+      // Refresh changes the order while keeping compatibility information.
+      if (cancelled) return
+      const historyKey = `brework:discover-viewed:${user.id}`
+      let viewedIds: string[] = []
+      try {
+        const stored: unknown = JSON.parse(sessionStorage.getItem(historyKey) || '[]')
+        if (Array.isArray(stored)) {
+          viewedIds = stored.filter((id): id is string => typeof id === 'string')
+        }
+      } catch {
+        // Discovery still works when browser storage is unavailable.
+      }
 
-            if (profile.show_academic_info) {
-              reasons.push('Same major')
-            }
-          }
+      const viewed = new Set(viewedIds)
+      const lastViewedId = viewedIds[viewedIds.length - 1]
+      // Weighted random order: stronger preference matches are more likely to
+      // appear early, but every eligible person remains in the round.
+      const shuffled = scoredProfiles
+        .map(item => ({ item, priority: -Math.log(Math.max(Math.random(), Number.EPSILON)) / (1 + item.score) }))
+        .sort((a, b) => a.priority - b.priority)
+        .map(entry => entry.item)
+      const fresh = shuffled.filter(item => !viewed.has(item.profile.id))
+      const previous = shuffled.filter(item => viewed.has(item.profile.id))
+      const ordered = [...fresh, ...previous]
 
-          // Same academic year
-          if (
-            myProfile.academic_year &&
-            profile.academic_year &&
-            myProfile.academic_year
-              .trim()
-              .toLowerCase() ===
-              profile.academic_year
-                .trim()
-                .toLowerCase()
-          ) {
-            score += 1
+      // After everyone has been viewed, start another shuffled round.
+      // Avoid showing the most recently viewed person first when possible.
+      if (fresh.length === 0) {
+        if (ordered.length > 1 && ordered[0].profile.id === lastViewedId) {
+          ;[ordered[0], ordered[1]] = [ordered[1], ordered[0]]
+        }
+        try {
+          sessionStorage.setItem(historyKey, JSON.stringify(lastViewedId ? [lastViewedId] : []))
+        } catch {
+          // Storage is optional.
+        }
+      }
 
-            if (profile.show_academic_info) {
-              reasons.push(
-                'Same academic year'
-              )
-            }
-          }
-
-          return {
-            profile,
-            score,
-            reasons,
-          }
-        })
-
-      // Highest compatibility first
-      scoredProfiles.sort(
-        (a, b) => b.score - a.score
-      )
-
-      setProfiles(scoredProfiles)
+      setCurrentIndex(0)
+      setProfiles(ordered)
       setLoading(false)
     }
 
-    loadProfiles()
-  }, [router])
+    void loadProfiles()
+    return () => { cancelled = true }
+  }, [router, round])
+
+  // Re-fetch at the end of each round so new users can appear and new
+  // connection requests/blocks are excluded before another round starts.
+  useEffect(() => {
+    if (!loading && !error && profiles.length > 0 && currentIndex >= profiles.length) {
+      setLoading(true)
+      setRound(value => value + 1)
+    }
+  }, [currentIndex, profiles.length, loading, error])
 
   const currentMatch =
     profiles[currentIndex]
 
   const currentProfile =
     currentMatch?.profile
+
+  useEffect(() => {
+    if (!userId || !currentProfile?.id) return
+    const historyKey = `brework:discover-viewed:${userId}`
+    try {
+      const stored: unknown = JSON.parse(sessionStorage.getItem(historyKey) || '[]')
+      const ids = Array.isArray(stored)
+        ? stored.filter((id): id is string => typeof id === 'string')
+        : []
+      const next = ids.filter(id => id !== currentProfile.id)
+      next.push(currentProfile.id)
+      sessionStorage.setItem(historyKey, JSON.stringify(next.slice(-2000)))
+    } catch {
+      // Storage is optional; the order is still shuffled on refresh.
+    }
+  }, [userId, currentProfile?.id])
 
   // ============================================
   // SEND CONNECTION REQUEST
@@ -483,7 +610,7 @@ export default function DiscoverPage() {
     score: number
   ) {
     return Math.round(
-      (score / 6) * 100
+      (score / possibleScore) * 100
     )
   }
 
@@ -644,13 +771,13 @@ export default function DiscoverPage() {
             </div>
 
             <h2 className="mt-6 text-2xl font-bold">
-              You&apos;re all caught up.
+              No available profiles right now.
             </h2>
 
             <p className="mx-auto mt-2 max-w-sm leading-relaxed text-gray-500">
-              You&apos;ve gone through everyone
-              currently available. Check back
-              later for more students.
+              Everyone available may already be connected, pending,
+              or excluded by privacy and block settings. Refresh to
+              check for new students.
             </p>
 
             <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:justify-center">
