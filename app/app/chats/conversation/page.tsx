@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
 } from 'react'
+import { createPortal } from 'react-dom'
 import {
   createClient,
 } from '@/lib/supabase/client'
@@ -29,6 +30,21 @@ type Message = {
   read_at: string | null
 }
 
+const REACTIONS = [
+  { emoji: '❤️', label: 'Heart' },
+  { emoji: '👍', label: 'Thumbs up' },
+  { emoji: '😂', label: 'Laugh' },
+  { emoji: '👎', label: 'Thumbs down' },
+] as const
+
+type Reaction = {
+  message_id: number
+  user_id: string
+  match_id: number
+  emoji: string | null
+  updated_at: string
+}
+
 export default function ConversationPage() {
   const router = useRouter()
 
@@ -50,6 +66,138 @@ export default function ConversationPage() {
 
   const [messages, setMessages] =
     useState<Message[]>([])
+
+  const [reactions, setReactions] = useState<Reaction[]>([])
+  const [reactionMessage, setReactionMessage] = useState<Message | null>(null)
+  const [reactionError, setReactionError] = useState('')
+  const [reactionSaving, setReactionSaving] = useState(false)
+  const reactionLock = useRef(false)
+  const reactionGeneration = useRef(0)
+  const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const holdOrigin = useRef<{ x: number; y: number } | null>(null)
+  const reactionDialog = useRef<HTMLDivElement | null>(null)
+  const [reactionPosition, setReactionPosition] = useState({ top: 0, left: 0 })
+
+  function cancelHold() {
+    if (holdTimer.current) clearTimeout(holdTimer.current)
+    holdTimer.current = null
+    holdOrigin.current = null
+  }
+
+  function openReactions(message: Message) {
+    cancelHold()
+    const anchor = document.querySelector<HTMLElement>(`[data-reaction-message="${message.id}"]`)
+    if (!anchor) return
+    const rect = anchor.getBoundingClientRect()
+    const width = Math.min(224, window.innerWidth - 24)
+    const height = 60
+    const viewportTop = window.visualViewport?.offsetTop ?? 0
+    const viewportBottom = viewportTop + (window.visualViewport?.height ?? window.innerHeight)
+    const above = rect.top - height - 8
+    setReactionPosition({
+      left: Math.max(12, Math.min(rect.left + rect.width / 2 - width / 2, window.innerWidth - width - 12)),
+      top: Math.max(viewportTop + 8, Math.min(above >= viewportTop + 8 ? above : rect.bottom + 8, viewportBottom - height - 8)),
+    })
+    setReactionError('')
+    setReactionMessage(message)
+  }
+
+  useEffect(() => {
+    const generation = ++reactionGeneration.current
+    let active = true
+    let refreshVersion = 0
+    setReactions([])
+    setReactionMessage(null)
+    setReactionError('')
+    cancelHold()
+    if (!currentUserId || !Number.isFinite(matchId) || matchId <= 0) return
+    const supabase = createClient()
+    async function refreshReactions() {
+      const version = ++refreshVersion
+      const { data, error } = await supabase.from('message_reactions')
+        .select('message_id,user_id,match_id,emoji,updated_at').eq('match_id', matchId)
+      if (!active || generation !== reactionGeneration.current || version !== refreshVersion) return
+      if (error) { setReactionError('Could not load reactions. Please refresh and try again.'); return }
+      setReactions((data || []) as Reaction[])
+      setReactionError('')
+    }
+    const channel = supabase.channel(`message-reactions-${matchId}-${currentUserId}`)
+      .on('postgres_changes', {
+        event: '*', schema: 'public', table: 'message_reactions', filter: `match_id=eq.${matchId}`,
+      }, () => { void refreshReactions() })
+      .subscribe(status => { if (status === 'SUBSCRIBED') void refreshReactions() })
+    const onVisible = () => { if (document.visibilityState === 'visible') void refreshReactions() }
+    document.addEventListener('visibilitychange', onVisible)
+    void refreshReactions()
+    return () => {
+      active = false
+      cancelHold()
+      document.removeEventListener('visibilitychange', onVisible)
+      void supabase.removeChannel(channel)
+    }
+  }, [matchId, currentUserId])
+
+  useEffect(() => {
+    if (!reactionMessage) return
+    const previousFocus = document.activeElement as HTMLElement | null
+    reactionDialog.current?.querySelector<HTMLButtonElement>('button')?.focus({ preventScroll: true })
+    const close = () => setReactionMessage(null)
+    function onOutside(event: PointerEvent) {
+      if (!reactionDialog.current?.contains(event.target as Node)) close()
+    }
+    function onKey(event: KeyboardEvent) {
+      if (event.key === 'Escape' || event.key === 'Tab') close()
+    }
+    document.addEventListener('pointerdown', onOutside)
+    document.addEventListener('keydown', onKey)
+    window.addEventListener('scroll', close, true)
+    window.addEventListener('resize', close)
+    window.visualViewport?.addEventListener('resize', close)
+    return () => {
+      document.removeEventListener('pointerdown', onOutside)
+      document.removeEventListener('keydown', onKey)
+      window.removeEventListener('scroll', close, true)
+      window.removeEventListener('resize', close)
+      window.visualViewport?.removeEventListener('resize', close)
+      if (document.activeElement === document.body || reactionDialog.current?.contains(document.activeElement)) {
+        previousFocus?.focus({ preventScroll: true })
+      }
+    }
+  }, [reactionMessage])
+
+  useEffect(() => {
+    const onScroll = () => cancelHold()
+    window.addEventListener('scroll', onScroll, true)
+    return () => { cancelHold(); window.removeEventListener('scroll', onScroll, true) }
+  }, [])
+
+  async function toggleReaction(message: Message, emoji: string) {
+    if (reactionLock.current) return
+    reactionLock.current = true
+    setReactionSaving(true)
+    setReactionError('')
+    const generation = reactionGeneration.current
+    try {
+      const supabase = createClient()
+      const { data, error } = await supabase.rpc('brework_toggle_message_reaction', {
+        p_message_id: message.id, p_emoji: emoji,
+      })
+      if (error) throw error
+      if (generation !== reactionGeneration.current) return
+      const row = (Array.isArray(data) ? data[0] : data) as Reaction | undefined
+      if (!row) throw new Error('No reaction was saved.')
+      setReactions(current => [...current.filter(r => !(r.message_id === row.message_id && r.user_id === row.user_id)), row])
+      setReactionMessage(null)
+    } catch (cause) {
+      if (generation === reactionGeneration.current) {
+        const message = cause && typeof cause === 'object' && 'message' in cause ? String(cause.message) : 'Please try again.'
+        setReactionError(`Could not save reaction: ${message}`)
+      }
+    } finally {
+      reactionLock.current = false
+      setReactionSaving(false)
+    }
+  }
 
   const [newMessage, setNewMessage] =
     useState('')
@@ -1129,6 +1277,28 @@ export default function ConversationPage() {
                   >
 
                     <div
+                      data-reaction-message={message.id}
+                      tabIndex={0}
+                      role="button"
+                      aria-label={`React to message: ${message.message}`}
+                      style={{ WebkitTouchCallout: 'none', userSelect: 'none', touchAction: 'pan-y' }}
+                      onPointerDown={event => {
+                        if (!event.isPrimary || event.button !== 0) return
+                        cancelHold()
+                        holdOrigin.current = { x: event.clientX, y: event.clientY }
+                        holdTimer.current = setTimeout(() => openReactions(message), 500)
+                      }}
+                      onPointerMove={event => {
+                        const origin = holdOrigin.current
+                        if (origin && Math.hypot(event.clientX - origin.x, event.clientY - origin.y) > 10) cancelHold()
+                      }}
+                      onPointerUp={cancelHold}
+                      onPointerCancel={cancelHold}
+                      onPointerLeave={cancelHold}
+                      onContextMenu={event => { event.preventDefault(); openReactions(message) }}
+                      onKeyDown={event => {
+                        if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openReactions(message) }
+                      }}
                       className={`min-w-0 [overflow-wrap:anywhere] rounded-2xl px-4 py-3 text-sm leading-relaxed ${
                         isMine
                           ? 'rounded-br-md bg-black text-white'
@@ -1136,6 +1306,23 @@ export default function ConversationPage() {
                       }`}
                     >
                       {message.message}
+                    </div>
+
+                    <div className={`mt-1 flex flex-wrap gap-1 ${isMine ? 'justify-end' : 'justify-start'}`}>
+                      {REACTIONS.map(({ emoji, label }) => {
+                        const selected = reactions.filter(r => r.message_id === message.id && r.emoji === emoji)
+                        if (!selected.length) return null
+                        const mine = selected.some(r => r.user_id === currentUserId)
+                        return (
+                          <button key={emoji} type="button" disabled={reactionSaving}
+                            aria-label={`${label}: ${selected.length}${mine ? ', your reaction. Tap to remove.' : '. Tap to react.'}`}
+                            aria-pressed={mine} onClick={() => { void toggleReaction(message, emoji) }}
+                            className="min-h-8 rounded-full border px-2 py-1 text-xs disabled:opacity-60"
+                            style={{ backgroundColor: mine ? '#dbeafe' : '#f1f5f9', borderColor: mine ? '#2563eb' : '#cbd5e1', color: '#0f172a' }}>
+                            {emoji} {selected.length}
+                          </button>
+                        )
+                      })}
                     </div>
 
                     <div
@@ -1216,6 +1403,25 @@ export default function ConversationPage() {
       </div>
 
       {/* ======================================== */}
+      {reactionError && (
+        <p role="alert" className="shrink-0 px-4 py-2 text-sm text-red-600">{reactionError}</p>
+      )}
+      {reactionMessage && createPortal(
+        <div ref={reactionDialog} role="group" aria-label="Message reactions"
+          className="fixed z-[60] flex items-center justify-between gap-1 rounded-full border p-1.5 shadow-xl"
+          style={{ top: reactionPosition.top, left: reactionPosition.left, width: 'min(224px, calc(100vw - 24px))', backgroundColor: '#ffffff', borderColor: '#cbd5e1', color: '#0f172a' }}>
+          {REACTIONS.map(({ emoji, label }) => {
+            const mine = reactions.some(r => r.message_id === reactionMessage.id && r.user_id === currentUserId && r.emoji === emoji)
+            return <button key={emoji} type="button" aria-label={`${label}${mine ? ', tap to remove' : ''}`} aria-pressed={mine}
+              disabled={reactionSaving} onClick={() => { void toggleReaction(reactionMessage, emoji) }}
+              className="flex h-11 min-w-0 flex-1 items-center justify-center rounded-full text-2xl disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-blue-500"
+              style={{ backgroundColor: mine ? '#dbeafe' : 'transparent' }}>
+              {emoji}
+            </button>
+          })}
+        </div>, document.body
+      )}
+
       {/* REPORT MESSAGE MODAL */}
       {/* ======================================== */}
 
