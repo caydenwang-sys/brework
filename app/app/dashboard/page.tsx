@@ -1149,11 +1149,9 @@ export default function DashboardPage() {
         // PROFILE
         // ========================================
 
-        const {
-          data: profileData,
-          error: profileError,
-        } =
-          await supabase
+      // Independent reads run together; existing validation and state updates stay below.
+      const initialLoadResults = await Promise.all([
+        supabase
             .from('profiles')
             .select(
               'first_name, last_name'
@@ -1162,7 +1160,37 @@ export default function DashboardPage() {
               'id',
               currentUserId
             )
-            .single()
+            .single(),
+        supabase
+            .from('connections')
+            .select('id')
+            .or(
+              `sender_id.eq.${currentUserId},receiver_id.eq.${currentUserId}`
+            )
+            .eq(
+              'status',
+              'accepted'
+            ),
+        supabase
+            .from('notifications')
+            .select('id')
+            .eq(
+              'user_id',
+              currentUserId
+            )
+            .eq(
+              'is_read',
+              false
+            ),
+        loadUpcomingMeetings(currentUserId),
+        loadRecommendedProfiles(currentUserId)
+      ])
+
+        const {
+          data: profileData,
+          error: profileError,
+        } =
+          initialLoadResults[0]
 
         if (profileError) {
           console.error(
@@ -1183,16 +1211,7 @@ export default function DashboardPage() {
           data: connections,
           error: connectionsError,
         } =
-          await supabase
-            .from('connections')
-            .select('id')
-            .or(
-              `sender_id.eq.${currentUserId},receiver_id.eq.${currentUserId}`
-            )
-            .eq(
-              'status',
-              'accepted'
-            )
+          initialLoadResults[1]
 
         if (connectionsError) {
           console.error(
@@ -1213,17 +1232,7 @@ export default function DashboardPage() {
           data: notifications,
           error: notificationsError,
         } =
-          await supabase
-            .from('notifications')
-            .select('id')
-            .eq(
-              'user_id',
-              currentUserId
-            )
-            .eq(
-              'is_read',
-              false
-            )
+          initialLoadResults[2]
 
         if (notificationsError) {
           console.error(
@@ -1240,17 +1249,13 @@ export default function DashboardPage() {
         // MEETINGS
         // ========================================
 
-        await loadUpcomingMeetings(
-          currentUserId
-        )
+
 
         // ========================================
         // RECOMMENDED PEOPLE
         // ========================================
 
-        await loadRecommendedProfiles(
-          currentUserId
-        )
+
 
         setLoading(false)
       },

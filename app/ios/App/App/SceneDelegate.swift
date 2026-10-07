@@ -7,9 +7,14 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     func scene(_ scene: UIScene, willConnectTo session: UISceneSession, options connectionOptions: UIScene.ConnectionOptions) {
         guard let windowScene = scene as? UIWindowScene else { return }
 
-        window = UIWindow(windowScene: windowScene)
-        window?.rootViewController = CAPBridgeViewController()
-        window?.makeKeyAndVisible()
+        // UIKit supplies the window and Capacitor controller from Main.storyboard.
+        // Only create a window if no storyboard window was supplied.
+        if window == nil {
+            let appWindow = UIWindow(windowScene: windowScene)
+            appWindow.rootViewController = CAPBridgeViewController()
+            window = appWindow
+            appWindow.makeKeyAndVisible()
+        }
 
         SceneDelegateProxy.shared.scene(scene, willConnectTo: session, options: connectionOptions)
     }

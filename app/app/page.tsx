@@ -37,6 +37,13 @@ export default function HomePage() {
           setError('Could not check your account setup. Please try again.')
           return
         }
+        // A notification tap owns navigation while its recipient/type is resolving.
+        let pushNavigationPending = false
+        try {
+          const started = Number(sessionStorage.getItem('brework:push-navigation') || 0)
+          pushNavigationPending = started > 0 && Date.now() - started < 30000
+        } catch {}
+        if (pushNavigationPending || window.location.pathname !== '/') return
         router.replace(profile?.onboarding_completed_at ? '/dashboard' : '/onboarding')
         return
       }

@@ -469,11 +469,9 @@ export default function SearchPage() {
       // MY PROFILE
       // ========================================
 
-      const {
-        data: currentProfile,
-        error: currentProfileError,
-      } =
-        await supabase
+      // Independent reads run together; existing validation and state updates stay below.
+      const initialLoadResults = await Promise.all([
+        supabase
           .from('profiles')
           .select(`
             id,
@@ -489,7 +487,53 @@ export default function SearchPage() {
             show_career_goal
           `)
           .eq('id', user.id)
-          .single()
+          .single(),
+        supabase
+          .from(
+            'match_preferences'
+          )
+          .select(`
+            user_id,
+            same_major,
+            similar_career_interests,
+            outside_major,
+            upperclassmen,
+            mentors,
+            project_collaborators,
+            frequency,
+            match_style
+          `)
+          .eq(
+            'user_id',
+            user.id
+          )
+          .maybeSingle(),
+        supabase
+          .from('connections')
+          .select(`
+            sender_id,
+            receiver_id,
+            status
+          `)
+          .or(
+            `sender_id.eq.${user.id},receiver_id.eq.${user.id}`
+          ),
+        supabase
+          .from('blocked_users')
+          .select(`
+            blocker_id,
+            blocked_id
+          `)
+          .or(
+            `blocker_id.eq.${user.id},blocked_id.eq.${user.id}`
+          )
+      ])
+
+      const {
+        data: currentProfile,
+        error: currentProfileError,
+      } =
+        initialLoadResults[0]
 
       if (
         currentProfileError ||
@@ -518,26 +562,7 @@ export default function SearchPage() {
         data: preferenceData,
         error: preferenceError,
       } =
-        await supabase
-          .from(
-            'match_preferences'
-          )
-          .select(`
-            user_id,
-            same_major,
-            similar_career_interests,
-            outside_major,
-            upperclassmen,
-            mentors,
-            project_collaborators,
-            frequency,
-            match_style
-          `)
-          .eq(
-            'user_id',
-            user.id
-          )
-          .maybeSingle()
+        initialLoadResults[1]
 
       if (preferenceError) {
         console.error(
@@ -558,16 +583,7 @@ export default function SearchPage() {
         data: connections,
         error: connectionsError,
       } =
-        await supabase
-          .from('connections')
-          .select(`
-            sender_id,
-            receiver_id,
-            status
-          `)
-          .or(
-            `sender_id.eq.${user.id},receiver_id.eq.${user.id}`
-          )
+        initialLoadResults[2]
 
       if (connectionsError) {
         setError(
@@ -586,15 +602,7 @@ export default function SearchPage() {
         data: blockedRelationships,
         error: blockedRelationshipsError,
       } =
-        await supabase
-          .from('blocked_users')
-          .select(`
-            blocker_id,
-            blocked_id
-          `)
-          .or(
-            `blocker_id.eq.${user.id},blocked_id.eq.${user.id}`
-          )
+        initialLoadResults[3]
 
       if (blockedRelationshipsError) {
         setError(
@@ -709,11 +717,8 @@ export default function SearchPage() {
       // LOAD INTERESTS
       // ========================================
 
-      const {
-        data: userInterestRows,
-        error: userInterestError,
-      } =
-        await supabase
+      const detailLoadResults = await Promise.all([
+        supabase
           .from('user_interests')
           .select(`
             user_id,
@@ -722,7 +727,58 @@ export default function SearchPage() {
           .in(
             'user_id',
             profileIds
+          ),
+        supabase
+          .from('user_clubs')
+          .select(`
+            user_id,
+            club_id
+          `)
+          .in(
+            'user_id',
+            profileIds
+          ),
+        supabase
+          .from(
+            'work_experience'
           )
+          .select(`
+            id,
+            user_id,
+            company_name,
+            role_title,
+            industry,
+            description,
+            start_date,
+            end_date,
+            is_current
+          `)
+          .in(
+            'user_id',
+            profileIds
+          ),
+        supabase
+          .from(
+            'projects'
+          )
+          .select(`
+            id,
+            user_id,
+            title,
+            description,
+            created_at
+          `)
+          .in(
+            'user_id',
+            profileIds
+          )
+      ])
+
+      const {
+        data: userInterestRows,
+        error: userInterestError,
+      } =
+        detailLoadResults[0]
 
       if (userInterestError) {
         setError(
@@ -843,16 +899,7 @@ export default function SearchPage() {
         data: userClubRows,
         error: userClubError,
       } =
-        await supabase
-          .from('user_clubs')
-          .select(`
-            user_id,
-            club_id
-          `)
-          .in(
-            'user_id',
-            profileIds
-          )
+        detailLoadResults[1]
 
       if (userClubError) {
         setError(
@@ -967,25 +1014,7 @@ export default function SearchPage() {
         data: workExperienceRows,
         error: workExperienceError,
       } =
-        await supabase
-          .from(
-            'work_experience'
-          )
-          .select(`
-            id,
-            user_id,
-            company_name,
-            role_title,
-            industry,
-            description,
-            start_date,
-            end_date,
-            is_current
-          `)
-          .in(
-            'user_id',
-            profileIds
-          )
+        detailLoadResults[2]
 
       if (workExperienceError) {
         setError(
@@ -1031,21 +1060,7 @@ export default function SearchPage() {
         data: projectRows,
         error: projectError,
       } =
-        await supabase
-          .from(
-            'projects'
-          )
-          .select(`
-            id,
-            user_id,
-            title,
-            description,
-            created_at
-          `)
-          .in(
-            'user_id',
-            profileIds
-          )
+        detailLoadResults[3]
 
       if (projectError) {
         setError(
@@ -2916,7 +2931,6 @@ export default function SearchPage() {
                 }
                 placeholder="Search people, majors, clubs, companies, projects..."
                 className="min-w-0 flex-1 bg-transparent text-base font-medium text-gray-900 outline-none placeholder:text-gray-400"
-                autoFocus
               />
 
               {query && (

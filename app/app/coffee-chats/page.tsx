@@ -80,6 +80,7 @@ function CoffeeChatsPageContent() {
     searchParams.get('view')
 
   const [coffeeChats, setCoffeeChats] = useState<CoffeeChat[]>([])
+  const [historyLimit, setHistoryLimit] = useState(5)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
@@ -767,13 +768,14 @@ function CoffeeChatsPageContent() {
   const pastChats =
     coffeeChats.filter(
       (chat) =>
+        chat.status === 'declined' ||
         chat.status === 'cancelled' ||
         chat.status === 'completed' ||
         (
           chat.status === 'scheduled' &&
           !isUpcoming(chat)
         )
-    )
+    ).sort((a, b) => `${b.scheduled_date}T${b.start_time}`.localeCompare(`${a.scheduled_date}T${a.start_time}`) || b.id - a.id)
 
   const calendarDays =
     getCalendarDays()
@@ -1556,25 +1558,22 @@ function CoffeeChatsPageContent() {
                 HISTORY
             ============================================ */}
 
-            {pastChats.length > 0 && (
 
-              <section className="mt-12">
+          </>
+        )}
 
-                <div className="mb-4">
-
-                  <p className="text-xs font-semibold uppercase tracking-[0.18em] text-gray-400">
-                    History
-                  </p>
-
-                  <h2 className="mt-1 text-2xl font-bold tracking-tight">
-                    Past coffee chats
-                  </h2>
-
-                </div>
-
+        {pastChats.length > 0 && (
+          <details className="mt-8 rounded-3xl border border-gray-200/70 bg-white p-5 shadow-sm"
+            onToggle={event => { if (!event.currentTarget.open) setHistoryLimit(5) }}>
+            <summary className="cursor-pointer text-lg font-bold">
+              Past chats <span className="text-sm font-normal text-gray-500">({pastChats.length})</span>
+            </summary>
+            <p className="mb-4 mt-2 text-sm text-gray-500">
+              Previous, completed, cancelled, and declined coffee chats. Your history stays available here.
+            </p>
                 <div className="space-y-2.5">
 
-                  {pastChats.map((chat) => (
+                  {pastChats.slice(0, historyLimit).map((chat) => (
 
                     <div
                       key={chat.id}
@@ -1630,7 +1629,7 @@ function CoffeeChatsPageContent() {
                           {chat.status ===
                           'cancelled'
                             ? 'Cancelled'
-                            : 'Completed'}
+                            : chat.status === 'declined' ? 'Declined' : chat.status === 'completed' ? 'Completed' : 'Past'}
                         </span>
 
                       </div>
@@ -1640,12 +1639,13 @@ function CoffeeChatsPageContent() {
                   ))}
 
                 </div>
-
-              </section>
-
+            {historyLimit < pastChats.length && (
+              <button type="button" onClick={() => setHistoryLimit(current => current + 5)}
+                className="mt-4 w-full rounded-xl border border-gray-200 px-4 py-3 text-sm font-semibold">
+                {historyLimit === 5 ? 'View history' : 'Load more history'}
+              </button>
             )}
-
-          </>
+          </details>
         )}
 
       </div>

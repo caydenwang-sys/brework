@@ -1121,13 +1121,6 @@ export default function ConnectionsPage() {
             </p>
           </div>
 
-          <button
-            onClick={loadConnections}
-            className="shrink-0 rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-sm font-semibold shadow-sm transition hover:bg-gray-50"
-          >
-            Refresh
-          </button>
-
         </div>
 
         {/* Error */}
