@@ -102,11 +102,47 @@ export default function DiscoverPage() {
 
       setUserId(user.id)
 
-      const { data: preferences, error: preferencesError } = await supabase
+      // Independent reads run together; existing validation and state updates stay below.
+      const initialLoadResults = await Promise.all([
+        supabase
         .from('match_preferences')
         .select('same_major,similar_career_interests,outside_major,upperclassmen,mentors,project_collaborators,match_style')
         .eq('user_id', user.id)
-        .maybeSingle()
+        .maybeSingle(),
+        supabase
+        .from('profiles')
+        .select(`
+          id,
+          first_name,
+          last_name,
+          major,
+          academic_year,
+          bio,
+          career_goal,
+          profile_photo_url
+        `)
+        .eq('id', user.id)
+        .single(),
+        supabase
+        .from('connections')
+        .select(
+          'sender_id, receiver_id, status'
+        )
+        .or(
+          `sender_id.eq.${user.id},receiver_id.eq.${user.id}`
+        ),
+        supabase
+        .from('blocked_users')
+        .select(`
+          blocker_id,
+          blocked_id
+        `)
+        .or(
+          `blocker_id.eq.${user.id},blocked_id.eq.${user.id}`
+        )
+      ])
+
+      const { data: preferences, error: preferencesError } = initialLoadResults[0]
       if (cancelled) return
       if (preferencesError) {
         setError(`Could not load matching preferences: ${preferencesError.message}`)
@@ -131,20 +167,7 @@ export default function DiscoverPage() {
       const {
         data: myProfile,
         error: myProfileError,
-      } = await supabase
-        .from('profiles')
-        .select(`
-          id,
-          first_name,
-          last_name,
-          major,
-          academic_year,
-          bio,
-          career_goal,
-          profile_photo_url
-        `)
-        .eq('id', user.id)
-        .single()
+      } = initialLoadResults[1]
 
       if (myProfileError || !myProfile) {
         setError(
@@ -165,14 +188,7 @@ export default function DiscoverPage() {
       const {
         data: connections,
         error: connectionsError,
-      } = await supabase
-        .from('connections')
-        .select(
-          'sender_id, receiver_id, status'
-        )
-        .or(
-          `sender_id.eq.${user.id},receiver_id.eq.${user.id}`
-        )
+      } = initialLoadResults[2]
 
       if (connectionsError) {
         setError(
@@ -190,15 +206,7 @@ export default function DiscoverPage() {
       const {
         data: blockedRelationships,
         error: blockedRelationshipsError,
-      } = await supabase
-        .from('blocked_users')
-        .select(`
-          blocker_id,
-          blocked_id
-        `)
-        .or(
-          `blocker_id.eq.${user.id},blocked_id.eq.${user.id}`
-        )
+      } = initialLoadResults[3]
 
       if (blockedRelationshipsError) {
         setError(

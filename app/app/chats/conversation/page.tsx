@@ -69,6 +69,30 @@ export default function ConversationPage() {
   const [messages, setMessages] =
     useState<Message[]>([])
 
+  const [selectedMessageId, setSelectedMessageId] = useState<number | null>(null)
+  const suppressMessageTap = useRef(false)
+
+  useEffect(() => { setSelectedMessageId(null) }, [matchId])
+
+  useEffect(() => {
+    if (selectedMessageId === null) return
+    function dismiss(event: PointerEvent) {
+      const target = event.target
+      if (!(target instanceof Element) || !target.closest(`[data-message-details="${selectedMessageId}"]`)) {
+        setSelectedMessageId(null)
+      }
+    }
+    function escape(event: KeyboardEvent) {
+      if (event.key === 'Escape') setSelectedMessageId(null)
+    }
+    document.addEventListener('pointerdown', dismiss)
+    document.addEventListener('keydown', escape)
+    return () => {
+      document.removeEventListener('pointerdown', dismiss)
+      document.removeEventListener('keydown', escape)
+    }
+  }, [selectedMessageId])
+
   const [reactions, setReactions] = useState<Reaction[]>([])
   const [reactionMessage, setReactionMessage] = useState<Message | null>(null)
   const [reactionError, setReactionError] = useState('')
@@ -101,6 +125,7 @@ export default function ConversationPage() {
       top: Math.max(viewportTop + 8, Math.min(above >= viewportTop + 8 ? above : rect.bottom + 8, viewportBottom - height - 8)),
     })
     setReactionError('')
+    setSelectedMessageId(null)
     setReactionMessage(message)
   }
 
@@ -1317,7 +1342,7 @@ export default function ConversationPage() {
 
         ) : (
 
-          <div className="flex flex-1 flex-col justify-end gap-3">
+          <div className="flex flex-1 flex-col justify-end gap-2">
 
             {messages.map((message) => {
 
@@ -1336,6 +1361,7 @@ export default function ConversationPage() {
                 >
 
                   <div
+                    data-message-details={message.id}
                     className={`max-w-[80%] sm:max-w-[65%] ${
                       isMine
                         ? 'items-end'
@@ -1347,13 +1373,19 @@ export default function ConversationPage() {
                       data-reaction-message={message.id}
                       tabIndex={0}
                       role="button"
-                      aria-label={`React to message: ${message.message}`}
+                      aria-label={`Message: ${message.message}. Tap for time; hold for reactions.`}
+                      aria-expanded={selectedMessageId === message.id}
+                      onClick={() => {
+                        if (suppressMessageTap.current) { suppressMessageTap.current = false; return }
+                        setSelectedMessageId(current => current === message.id ? null : message.id)
+                      }}
                       style={{ WebkitTouchCallout: 'none', userSelect: 'none', touchAction: 'pan-y' }}
                       onPointerDown={event => {
                         if (!event.isPrimary || event.button !== 0) return
                         cancelHold()
+                        suppressMessageTap.current = false
                         holdOrigin.current = { x: event.clientX, y: event.clientY }
-                        holdTimer.current = setTimeout(() => openReactions(message), 500)
+                        holdTimer.current = setTimeout(() => { suppressMessageTap.current = true; openReactions(message) }, 500)
                       }}
                       onPointerMove={event => {
                         const origin = holdOrigin.current
@@ -1362,9 +1394,13 @@ export default function ConversationPage() {
                       onPointerUp={cancelHold}
                       onPointerCancel={cancelHold}
                       onPointerLeave={cancelHold}
-                      onContextMenu={event => { event.preventDefault(); openReactions(message) }}
+                      onContextMenu={event => { event.preventDefault(); suppressMessageTap.current = true; openReactions(message) }}
                       onKeyDown={event => {
-                        if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openReactions(message) }
+                        if (event.key === 'Enter' || event.key === ' ') {
+                          event.preventDefault()
+                          setSelectedMessageId(current => current === message.id ? null : message.id)
+                        }
+                        if (event.key === 'F10' && event.shiftKey) { event.preventDefault(); openReactions(message) }
                       }}
                       className={`min-w-0 [overflow-wrap:anywhere] rounded-2xl px-4 py-3 text-sm leading-relaxed ${
                         isMine
@@ -1375,6 +1411,7 @@ export default function ConversationPage() {
                       {message.message}
                     </div>
 
+                    {reactions.some(r => r.message_id === message.id && r.emoji) && (
                     <div className={`mt-1 flex flex-wrap gap-1 ${isMine ? 'justify-end' : 'justify-start'}`}>
                       {REACTIONS.map(({ emoji, label }) => {
                         const selected = reactions.filter(r => r.message_id === message.id && r.emoji === emoji)
@@ -1391,7 +1428,9 @@ export default function ConversationPage() {
                         )
                       })}
                     </div>
+                    )}
 
+                    {selectedMessageId === message.id && (
                     <div
                       className={`mt-1 flex items-center gap-1 px-1 text-[10px] text-gray-400 ${
                         isMine
@@ -1449,6 +1488,7 @@ export default function ConversationPage() {
                       )}
 
                     </div>
+                    )}
 
                   </div>
 

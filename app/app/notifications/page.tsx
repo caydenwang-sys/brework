@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { useRouter } from 'next/navigation'
 
@@ -26,7 +26,28 @@ export default function NotificationsPage() {
 
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [markingAll, setMarkingAll] = useState(false)
+  const [visibleCount, setVisibleCount] = useState(20)
+  const initialReadDone = useRef(false)
+  const [newOnThisVisit, setNewOnThisVisit] = useState<Set<number>>(() => new Set())
+  const [historyCutoff] = useState(() => Date.now() - 30 * 24 * 60 * 60 * 1000)
+
+  const groupedNotifications = useMemo(() => {
+    const groups = new Map<string, { notification: Notification; unreadCount: number; unread: boolean }>()
+    const sorted = [...notifications].sort((a, b) =>
+      Date.parse(b.created_at) - Date.parse(a.created_at) || b.id - a.id)
+    for (const notification of sorted) {
+      // Old unread items remain available; read history is hidden, never deleted.
+      if (notification.is_read && Date.parse(notification.created_at) < historyCutoff) continue
+      const isMessage = notification.type === 'message' || notification.type === 'new_message'
+      const key = isMessage && (notification.related_user_id || notification.related_match_id)
+        ? `message:${notification.related_user_id || notification.related_match_id}`
+        : `notification:${notification.id}`
+      const group = groups.get(key)
+      if (group) { if (!notification.is_read || newOnThisVisit.has(notification.id)) group.unreadCount++; group.unread ||= !notification.is_read }
+      else groups.set(key, { notification, unreadCount: !notification.is_read || newOnThisVisit.has(notification.id) ? 1 : 0, unread: !notification.is_read })
+    }
+    return [...groups.values()]
+  }, [notifications, historyCutoff, newOnThisVisit])
 
   // ============================================
   // LOAD NOTIFICATIONS
@@ -37,33 +58,50 @@ export default function NotificationsPage() {
   ) {
     const supabase = createClient()
 
-    const {
-      data,
-      error: notificationError,
-    } = await supabase
-      .from('notifications')
-      .select('*')
-      .eq('user_id', currentUserId)
-      .order('created_at', {
-        ascending: false,
-      })
-
-    if (notificationError) {
-      console.error(
-        'Could not load notifications:',
-        notificationError
-      )
-
-      setError(
-        `Could not load notifications: ${notificationError.message}`
-      )
-
-      return
+    // Fetch in pages so Supabase's row limit cannot silently cut off history.
+    const collected: Notification[] = []
+    const cutoff = new Date(historyCutoff).toISOString()
+    for (let offset = 0; ; offset += 500) {
+      const { data, error: notificationError } = await supabase
+        .from('notifications').select('*').eq('user_id', currentUserId)
+        .or(`is_read.eq.false,created_at.gte.${cutoff}`)
+        .order('created_at', { ascending: false }).order('id', { ascending: false })
+        .range(offset, offset + 499)
+      if (notificationError) {
+        setError(`Could not load notifications: ${notificationError.message}`)
+        return
+      }
+      const rows = (data || []) as Notification[]
+      collected.push(...rows)
+      if (rows.length < 500) break
     }
-
-    setNotifications(
-      (data || []) as Notification[]
-    )
+    // Merge rather than overwrite arrivals received while the query was running.
+    setNotifications(current => {
+      const loaded = new Map(collected.map(item => [item.id, item]))
+      for (const item of current) if (!loaded.has(item.id)) loaded.set(item.id, item)
+      return [...loaded.values()]
+    })
+    // Reading the bell clears the opening snapshot only. Later arrivals stay unread.
+    if (!initialReadDone.current) {
+      initialReadDone.current = true
+      const ids = collected.filter(item => !item.is_read).map(item => item.id)
+      setNewOnThisVisit(current => new Set([...current, ...ids]))
+      const readIds = new Set<number>()
+      for (let offset = 0; offset < ids.length; offset += 200) {
+        const batch = ids.slice(offset, offset + 200)
+        const { error: updateError } = await supabase.from('notifications')
+          .update({ is_read: true }).eq('user_id', currentUserId).in('id', batch)
+        if (updateError) {
+          setError(`Could not mark notifications read: ${updateError.message}. Reopen Notifications to try again.`)
+          break
+        }
+        batch.forEach(id => readIds.add(id))
+      }
+      if (readIds.size) {
+        setNotifications(current => current.map(item => readIds.has(item.id) ? { ...item, is_read: true } : item))
+        window.dispatchEvent(new Event('brework:notifications-changed'))
+      }
+    }
   }
 
   // ============================================
@@ -252,7 +290,7 @@ export default function NotificationsPage() {
   // ============================================
 
   async function markAsRead(
-    notificationId: number
+    notificationIds: number[]
   ) {
     setError('')
 
@@ -264,7 +302,7 @@ export default function NotificationsPage() {
         .update({
           is_read: true,
         })
-        .eq('id', notificationId)
+        .in('id', notificationIds)
         .eq('user_id', userId)
 
     if (updateError) {
@@ -284,7 +322,7 @@ export default function NotificationsPage() {
 
     setNotifications((current) =>
       current.map((notification) =>
-        notification.id === notificationId
+        notificationIds.includes(notification.id)
           ? {
               ...notification,
               is_read: true,
@@ -301,8 +339,16 @@ export default function NotificationsPage() {
   async function handleNotificationClick(
     notification: Notification
   ) {
-    if (!notification.is_read) {
-      await markAsRead(notification.id)
+    {
+      const isMessage = notification.type === 'message' || notification.type === 'new_message'
+      const ids = notifications.filter(item => !item.is_read && (
+        item.id === notification.id || (isMessage &&
+          (item.type === 'message' || item.type === 'new_message') &&
+          (notification.related_user_id
+            ? item.related_user_id === notification.related_user_id
+            : notification.related_match_id !== null && item.related_match_id === notification.related_match_id))
+      )).map(item => item.id)
+      for (let offset = 0; offset < ids.length; offset += 200) await markAsRead(ids.slice(offset, offset + 200))
     }
 
     // ==========================================
@@ -321,6 +367,11 @@ export default function NotificationsPage() {
         router.push('/chats')
       }
 
+      return
+    }
+
+    if (notification.type.startsWith('coffee_chat_') && notification.type !== 'coffee_chat_request') {
+      router.push('/coffee-chats?view=calendar')
       return
     }
 
@@ -363,10 +414,10 @@ export default function NotificationsPage() {
     ) {
       if (notification.related_match_id) {
         router.push(
-          `/schedule?match=${notification.related_match_id}`
+          '/coffee-chats?view=calendar'
         )
       } else {
-        router.push('/schedule')
+        router.push('/coffee-chats?view=calendar')
       }
 
       return
@@ -382,10 +433,10 @@ export default function NotificationsPage() {
     ) {
       if (notification.related_match_id) {
         router.push(
-          `/schedule?match=${notification.related_match_id}`
+          '/coffee-chats?view=calendar'
         )
       } else {
-        router.push('/schedule')
+        router.push('/coffee-chats?view=calendar')
       }
 
       return
@@ -401,7 +452,7 @@ export default function NotificationsPage() {
     ) {
       if (notification.related_match_id) {
         router.push(
-          `/schedule?match=${notification.related_match_id}`
+          '/connections'
         )
       } else {
         router.push('/connections')
@@ -421,69 +472,6 @@ export default function NotificationsPage() {
       router.push('/connections')
       return
     }
-  }
-
-  // ============================================
-  // MARK ALL AS READ
-  // ============================================
-
-  async function markAllAsRead() {
-    if (markingAll) {
-      return
-    }
-
-    const unreadIds = notifications
-      .filter(
-        (notification) =>
-          !notification.is_read
-      )
-      .map(
-        (notification) =>
-          notification.id
-      )
-
-    if (unreadIds.length === 0) {
-      return
-    }
-
-    setMarkingAll(true)
-    setError('')
-
-    const supabase = createClient()
-
-    const { error: updateError } =
-      await supabase
-        .from('notifications')
-        .update({
-          is_read: true,
-        })
-        .eq('user_id', userId)
-        .in('id', unreadIds)
-
-    if (updateError) {
-      console.error(
-        'Could not mark notifications as read:',
-        updateError
-      )
-
-      setError(
-        `Could not mark notifications as read: ${updateError.message}`
-      )
-
-      setMarkingAll(false)
-      return
-    }
-
-    window.dispatchEvent(new Event('brework:notifications-changed'))
-
-    setNotifications((current) =>
-      current.map((notification) => ({
-        ...notification,
-        is_read: true,
-      }))
-    )
-
-    setMarkingAll(false)
   }
 
   // ============================================
@@ -627,32 +615,12 @@ export default function NotificationsPage() {
         )}
 
         {/* ====================================== */}
-        {/* MARK ALL */}
-        {/* ====================================== */}
-
-        {unreadCount > 0 && (
-          <div className="mt-5 flex justify-end">
-
-            <button
-              onClick={markAllAsRead}
-              disabled={markingAll}
-              className="text-sm font-semibold text-gray-600 underline transition hover:text-black disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {markingAll
-                ? 'Marking as read...'
-                : 'Mark all as read'}
-            </button>
-
-          </div>
-        )}
-
-        {/* ====================================== */}
         {/* NOTIFICATIONS */}
         {/* ====================================== */}
 
         <section className="mt-5">
 
-          {notifications.length === 0 ? (
+          {groupedNotifications.length === 0 ? (
 
             <div className="rounded-3xl border border-gray-200/70 bg-white p-10 text-center shadow-sm">
 
@@ -666,7 +634,7 @@ export default function NotificationsPage() {
 
               <p className="mx-auto mt-2 max-w-sm text-sm leading-relaxed text-gray-500">
                 When something happens on Brework,
-                you'll see it here.
+                you&apos;ll see it here.
               </p>
 
             </div>
@@ -675,8 +643,8 @@ export default function NotificationsPage() {
 
             <div className="space-y-3">
 
-              {notifications.map(
-                (notification) => (
+              {groupedNotifications.slice(0, visibleCount).map(
+                ({ notification, unreadCount, unread }) => (
 
                   <button
                     key={notification.id}
@@ -686,7 +654,7 @@ export default function NotificationsPage() {
                       )
                     }
                     className={`w-full rounded-2xl border p-5 text-left shadow-sm transition hover:-translate-y-0.5 hover:bg-gray-50 ${
-                      notification.is_read
+                      !unread
                         ? 'border-gray-200/70 bg-white'
                         : 'border-blue-200 bg-blue-50/50'
                     }`}
@@ -698,7 +666,7 @@ export default function NotificationsPage() {
 
                       <div
                         className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full ${
-                          notification.is_read
+                          !unread
                             ? 'bg-gray-100'
                             : 'bg-white'
                         }`}
@@ -717,16 +685,18 @@ export default function NotificationsPage() {
                         <div className="flex items-start justify-between gap-3">
 
                           <p className="font-semibold">
-                            {notification.title}
+                            {(notification.type === 'message' || notification.type === 'new_message') && unreadCount > 0
+                              ? `${notification.title === 'New message' ? 'Someone' : notification.title}: ${unreadCount} new ${unreadCount === 1 ? 'message' : 'messages'}`
+                              : notification.title}
                           </p>
 
-                          {!notification.is_read && (
+                          {unread && (
                             <span className="mt-1 h-2.5 w-2.5 shrink-0 rounded-full bg-blue-500" />
                           )}
 
                         </div>
 
-                        <p className="mt-1 text-sm leading-6 text-gray-600">
+                        <p className="mt-1 line-clamp-2 text-sm leading-6 text-gray-600">
                           {notification.message}
                         </p>
 
@@ -750,6 +720,16 @@ export default function NotificationsPage() {
           )}
 
         </section>
+
+        {visibleCount < groupedNotifications.length && (
+          <button type="button" onClick={() => setVisibleCount(current => current + 20)}
+            className="mt-5 w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm font-semibold">
+            Load older notifications
+          </button>
+        )}
+        <p className="mt-5 text-center text-xs text-gray-500">
+          Messages are grouped by sender. Read notifications older than 30 days are hidden.
+        </p>
 
       </div>
 

@@ -690,12 +690,9 @@ export default function ProfilePage() {
         user.id
       )
 
-      const {
-        data,
-        error:
-          profileError,
-      } =
-        await supabase
+      // Independent reads run together; existing validation and state updates stay below.
+      const initialLoadResults = await Promise.all([
+        supabase
           .from('profiles')
           .select(`
             id,
@@ -722,7 +719,171 @@ export default function ProfilePage() {
             'id',
             user.id
           )
-          .single()
+          .single(),
+        supabase
+          .from('profile_links')
+          .select(`
+            id,
+            label,
+            url,
+            sort_order
+          `)
+          .eq(
+            'user_id',
+            user.id
+          )
+          .order(
+            'sort_order',
+            {
+              ascending: true,
+            }
+          )
+          .order(
+            'id',
+            {
+              ascending: true,
+            }
+          ),
+        supabase
+          .from('interests')
+          .select(`
+            id,
+            name,
+            category
+          `)
+          .order(
+            'name',
+            {
+              ascending: true,
+            }
+          ),
+        supabase
+          .from(
+            'user_interests'
+          )
+          .select(`
+            interest_id
+          `)
+          .eq(
+            'user_id',
+            user.id
+          ),
+        supabase
+          .from('clubs')
+          .select(`
+            id,
+            name,
+            description
+          `)
+          .order(
+            'name',
+            {
+              ascending: true,
+            }
+          ),
+        supabase
+          .from('user_clubs')
+          .select(`
+            club_id
+          `)
+          .eq(
+            'user_id',
+            user.id
+          ),
+        supabase
+          .from('work_experience')
+          .select(`
+            id,
+            user_id,
+            company_name,
+            role_title,
+            industry,
+            description,
+            start_date,
+            end_date,
+            is_current
+          `)
+          .eq(
+            'user_id',
+            user.id
+          )
+          .order(
+            'start_date',
+            {
+              ascending: false,
+            }
+          ),
+        supabase
+          .from('projects')
+          .select(`
+            id,
+            user_id,
+            title,
+            description
+          `)
+          .eq(
+            'user_id',
+            user.id
+          )
+          .order(
+            'created_at',
+            {
+              ascending: false,
+            }
+          ),
+        supabase
+          .from(
+            'match_preferences'
+          )
+          .select(`
+            user_id,
+            same_major,
+            similar_career_interests,
+            outside_major,
+            upperclassmen,
+            mentors,
+            project_collaborators,
+            frequency,
+            match_style
+          `)
+          .eq(
+            'user_id',
+            user.id
+          )
+          .maybeSingle(),
+        supabase
+          .from('availability')
+          .select(`
+            id,
+            user_id,
+            day_of_week,
+            start_time,
+            end_time
+          `)
+          .eq(
+            'user_id',
+            user.id
+          )
+          .order(
+            'day_of_week',
+            {
+              ascending: true,
+            }
+          )
+          .order(
+            'start_time',
+            {
+              ascending: true,
+            }
+          )
+      ])
+
+      const {
+        data,
+        error:
+          profileError,
+      } =
+        initialLoadResults[0]
 
       if (profileError) {
         setError(
@@ -799,30 +960,7 @@ export default function ProfilePage() {
         data: profileLinkData,
         error: profileLinksError,
       } =
-        await supabase
-          .from('profile_links')
-          .select(`
-            id,
-            label,
-            url,
-            sort_order
-          `)
-          .eq(
-            'user_id',
-            user.id
-          )
-          .order(
-            'sort_order',
-            {
-              ascending: true,
-            }
-          )
-          .order(
-            'id',
-            {
-              ascending: true,
-            }
-          )
+        initialLoadResults[1]
 
       if (profileLinksError) {
         setError(
@@ -874,19 +1012,7 @@ export default function ProfilePage() {
         data: interestData,
         error: interestError,
       } =
-        await supabase
-          .from('interests')
-          .select(`
-            id,
-            name,
-            category
-          `)
-          .order(
-            'name',
-            {
-              ascending: true,
-            }
-          )
+        initialLoadResults[2]
 
       if (interestError) {
         setError(
@@ -901,17 +1027,7 @@ export default function ProfilePage() {
         data: selectedRows,
         error: selectedError,
       } =
-        await supabase
-          .from(
-            'user_interests'
-          )
-          .select(`
-            interest_id
-          `)
-          .eq(
-            'user_id',
-            user.id
-          )
+        initialLoadResults[3]
 
       if (selectedError) {
         setError(
@@ -960,19 +1076,7 @@ export default function ProfilePage() {
         data: clubData,
         error: clubError,
       } =
-        await supabase
-          .from('clubs')
-          .select(`
-            id,
-            name,
-            description
-          `)
-          .order(
-            'name',
-            {
-              ascending: true,
-            }
-          )
+        initialLoadResults[4]
 
       if (clubError) {
         setError(
@@ -987,15 +1091,7 @@ export default function ProfilePage() {
         data: selectedClubRows,
         error: selectedClubError,
       } =
-        await supabase
-          .from('user_clubs')
-          .select(`
-            club_id
-          `)
-          .eq(
-            'user_id',
-            user.id
-          )
+        initialLoadResults[5]
 
       if (selectedClubError) {
         setError(
@@ -1044,29 +1140,7 @@ export default function ProfilePage() {
         data: workData,
         error: workError,
       } =
-        await supabase
-          .from('work_experience')
-          .select(`
-            id,
-            user_id,
-            company_name,
-            role_title,
-            industry,
-            description,
-            start_date,
-            end_date,
-            is_current
-          `)
-          .eq(
-            'user_id',
-            user.id
-          )
-          .order(
-            'start_date',
-            {
-              ascending: false,
-            }
-          )
+        initialLoadResults[6]
 
       if (workError) {
         setError(
@@ -1092,24 +1166,7 @@ export default function ProfilePage() {
         data: projectData,
         error: projectError,
       } =
-        await supabase
-          .from('projects')
-          .select(`
-            id,
-            user_id,
-            title,
-            description
-          `)
-          .eq(
-            'user_id',
-            user.id
-          )
-          .order(
-            'created_at',
-            {
-              ascending: false,
-            }
-          )
+        initialLoadResults[7]
 
       if (projectError) {
         setError(
@@ -1135,26 +1192,7 @@ export default function ProfilePage() {
         data: preferencesData,
         error: preferencesError,
       } =
-        await supabase
-          .from(
-            'match_preferences'
-          )
-          .select(`
-            user_id,
-            same_major,
-            similar_career_interests,
-            outside_major,
-            upperclassmen,
-            mentors,
-            project_collaborators,
-            frequency,
-            match_style
-          `)
-          .eq(
-            'user_id',
-            user.id
-          )
-          .maybeSingle()
+        initialLoadResults[8]
 
       if (preferencesError) {
         setError(
@@ -1204,31 +1242,7 @@ export default function ProfilePage() {
         data: availabilityData,
         error: availabilityError,
       } =
-        await supabase
-          .from('availability')
-          .select(`
-            id,
-            user_id,
-            day_of_week,
-            start_time,
-            end_time
-          `)
-          .eq(
-            'user_id',
-            user.id
-          )
-          .order(
-            'day_of_week',
-            {
-              ascending: true,
-            }
-          )
-          .order(
-            'start_time',
-            {
-              ascending: true,
-            }
-          )
+        initialLoadResults[9]
 
       if (availabilityError) {
         setError(

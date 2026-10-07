@@ -47,9 +47,7 @@ export default function RootLayout({
         <ThemeController />
         <GlobalMessageListener />
         <PushRegistration />
-        <PullToRefresh />
-
-        {children}
+        <PullToRefresh>{children}</PullToRefresh>
       </body>
     </html>
   );
