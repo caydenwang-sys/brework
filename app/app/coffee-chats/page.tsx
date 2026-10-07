@@ -92,7 +92,8 @@ function CoffeeChatsPageContent() {
     )
 
   const [calendarDate, setCalendarDate] =
-    useState(() => new Date())
+    useState(() => new Date(`${pacificToday()}T12:00:00`))
+  const [selectedCalendarDay, setSelectedCalendarDay] = useState(pacificToday)
 
   const [cancellingId, setCancellingId] =
     useState<number | null>(null)
@@ -428,16 +429,7 @@ function CoffeeChatsPageContent() {
   }
 
   function isToday(date: Date) {
-    const today = new Date()
-
-    return (
-      date.getFullYear() ===
-        today.getFullYear() &&
-      date.getMonth() ===
-        today.getMonth() &&
-      date.getDate() ===
-        today.getDate()
-    )
+    return dateToString(date) === pacificToday()
   }
 
   function getCalendarDays() {
@@ -501,32 +493,19 @@ function CoffeeChatsPageContent() {
     return calendarDays
   }
 
-  function previousMonth() {
-    setCalendarDate(
-      (current) =>
-        new Date(
-          current.getFullYear(),
-          current.getMonth() - 1,
-          1
-        )
-    )
+  function changeCalendarMonth(offset: number) {
+    const next = new Date(calendarDate.getFullYear(), calendarDate.getMonth() + offset, 1, 12)
+    setCalendarDate(next)
+    setSelectedCalendarDay(dateToString(next))
   }
 
-  function nextMonth() {
-    setCalendarDate(
-      (current) =>
-        new Date(
-          current.getFullYear(),
-          current.getMonth() + 1,
-          1
-        )
-    )
-  }
+  function previousMonth() { changeCalendarMonth(-1) }
+  function nextMonth() { changeCalendarMonth(1) }
 
   function goToToday() {
-    setCalendarDate(
-      new Date()
-    )
+    const today = pacificToday()
+    setCalendarDate(new Date(`${today}T12:00:00`))
+    setSelectedCalendarDay(today)
   }
 
   function getChatsForDate(
@@ -535,11 +514,10 @@ function CoffeeChatsPageContent() {
     const dateString =
       dateToString(date)
 
-    return upcomingChats.filter(
-      (chat) =>
-        chat.scheduled_date ===
-        dateString
-    )
+    return coffeeChats.filter(
+      chat => chat.scheduled_date === dateString &&
+        (chat.status === 'scheduled' || chat.status === 'completed')
+    ).sort((a, b) => a.start_time.localeCompare(b.start_time))
   }
 
   // ============================================
@@ -799,6 +777,8 @@ function CoffeeChatsPageContent() {
 
   const calendarDays =
     getCalendarDays()
+
+  const selectedDayChats = getChatsForDate(new Date(`${selectedCalendarDay}T12:00:00`))
 
   const calendarMonth =
     calendarDate.toLocaleDateString(
@@ -1206,176 +1186,81 @@ function CoffeeChatsPageContent() {
 
             </div>
 
-            {/* CALENDAR */}
-
-            <div className="overflow-x-auto rounded-[1.75rem] border border-gray-200/80 bg-white shadow-sm">
-
-              <div className="min-w-[760px]">
-
-                {/* WEEK DAYS */}
-
-                <div className="grid grid-cols-7 border-b border-gray-200 bg-[#fafaf9]">
-
-                  {weekdays.map(
-                    (weekday) => (
-                      <div
-                        key={weekday}
-                        className="border-r border-gray-100 px-3 py-3.5 text-center text-[11px] font-bold uppercase tracking-[0.14em] text-gray-400 last:border-r-0"
-                      >
-                        {weekday}
-                      </div>
-                    )
-                  )}
-
-                </div>
-
-                {/* DAYS */}
-
-                <div className="grid grid-cols-7">
-
-                  {calendarDays.map(
-                    (
-                      date,
-                      index
-                    ) => {
-
-                      if (!date) {
-                        return (
-                          <div
-                            key={`empty-${index}`}
-                            className="min-h-32 border-b border-r border-gray-100 bg-[#fafaf9]/70 p-2"
-                          />
-                        )
-                      }
-
-                      const chatsForDate =
-                        getChatsForDate(date)
-
-                      const today =
-                        isToday(date)
-
-                      return (
-                        <div
-                          key={
-                            date.toISOString()
-                          }
-                          className={`min-h-32 border-b border-r border-gray-100 p-2.5 transition-colors ${
-                            today
-                              ? 'bg-gray-50/80 shadow-[inset_0_0_0_1px_rgba(0,0,0,0.04)]'
-                              : 'bg-white hover:bg-gray-50/50'
-                          }`}
-                        >
-
-                          {/* DAY NUMBER */}
-
-                          <div className="flex items-center justify-between">
-
-                            <div
-                              className={`flex h-8 w-8 items-center justify-center rounded-full text-xs font-bold transition ${
-                                today
-                                  ? 'bg-black text-white shadow-sm'
-                                  : 'text-gray-600'
-                              }`}
-                            >
-                              {date.getDate()}
-                            </div>
-
-                            {today && (
-                              <span className="text-[9px] font-bold uppercase tracking-[0.12em] text-gray-400">
-                                Today
-                              </span>
-                            )}
-
-                          </div>
-
-                          {/* EVENTS */}
-
-                          <div className="mt-2.5 space-y-1.5">
-
-                            {chatsForDate.map(
-                              (chat) => (
-
-                                <button
-                                  key={chat.id}
-                                  type="button"
-                                  onClick={() =>
-                                    setSelectedChat(
-                                      chat
-                                    )
-                                  }
-                                  className="group w-full rounded-xl border border-gray-200/80 bg-gray-50 px-2.5 py-2.5 text-left shadow-sm transition duration-200 hover:-translate-y-0.5 hover:border-gray-300 hover:bg-white hover:shadow-md"
-                                >
-
-                                  {/* TIME */}
-
-                                  <div className="flex items-center gap-1.5">
-
-                                    <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-black" />
-
-                                    <p className="truncate text-[11px] font-bold text-gray-900">
-                                      {formatTime(
-                                        chat.start_time
-                                      )}
-                                    </p>
-
-                                  </div>
-
-                                  {/* PERSON */}
-
-                                  <p className="mt-1 truncate text-[12px] font-semibold text-gray-700 transition group-hover:text-black">
-                                    {getChatName(
-                                      chat
-                                    )}
-                                  </p>
-
-                                  {/* LOCATION */}
-
-                                  {chat.location && (
-                                    <p className="mt-1 flex items-center gap-1 truncate text-[10px] text-gray-400">
-
-                                      <span>
-                                        📍
-                                      </span>
-
-                                      <span className="truncate">
-                                        {chat.location}
-                                      </span>
-
-                                    </p>
-                                  )}
-
-                                </button>
-
-                              )
-                            )}
-
-                          </div>
-
-                        </div>
-                      )
-                    }
-                  )}
-
-                </div>
-
+            {/* A compact calendar fits every screen; details live below it. */}
+            <div className="w-full min-w-0 overflow-hidden rounded-3xl border border-gray-200/80 bg-white p-2 shadow-sm sm:p-4">
+              <div className="grid grid-cols-7 gap-1">
+                {weekdays.map(weekday => (
+                  <div key={weekday} className="min-w-0 py-2 text-center text-[10px] font-semibold text-gray-500 sm:text-xs">
+                    {weekday}
+                  </div>
+                ))}
+                {calendarDays.map((date, index) => {
+                  if (!date) return <div key={`empty-${index}`} aria-hidden="true" className="min-w-0" />
+                  const dateString = dateToString(date)
+                  const chats = getChatsForDate(date)
+                  const selected = dateString === selectedCalendarDay
+                  const today = isToday(date)
+                  return (
+                    <button
+                      key={dateString}
+                      type="button"
+                      aria-pressed={selected}
+                      aria-current={today ? 'date' : undefined}
+                      aria-label={`${formatDate(dateString)}, ${chats.length} coffee ${chats.length === 1 ? 'chat' : 'chats'}${today ? ', today' : ''}`}
+                      onClick={() => setSelectedCalendarDay(dateString)}
+                      className="flex min-h-12 min-w-0 flex-col items-center justify-center gap-1 rounded-xl border text-sm font-semibold transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500 sm:min-h-16"
+                      style={{
+                        backgroundColor: selected ? '#2563eb' : undefined,
+                        color: selected ? '#ffffff' : undefined,
+                        borderColor: selected ? '#2563eb' : today ? '#2563eb' : 'transparent',
+                      }}
+                    >
+                      <span>{date.getDate()}</span>
+                      <span aria-hidden="true" className="flex h-2 items-center justify-center gap-0.5">
+                        {chats.slice(0, 3).map(chat => (
+                          <span key={chat.id} className="h-1 w-1 rounded-full" style={{ backgroundColor: selected ? '#ffffff' : '#2563eb' }} />
+                        ))}
+                      </span>
+                    </button>
+                  )
+                })}
               </div>
-
+              <p className="mt-3 text-center text-xs text-gray-500">Dots mark coffee chats. Tap a date to see details.</p>
             </div>
 
-            {/* CALENDAR HELPER */}
-
-            <div className="mt-4 flex items-center justify-between">
-
-              <p className="text-xs text-gray-400">
-                Click a coffee chat to view details.
-              </p>
-
-              <p className="rounded-full bg-white px-3 py-1.5 text-xs font-semibold text-gray-400 shadow-sm">
-                {upcomingChats.length}{' '}
-                upcoming
-              </p>
-
-            </div>
+            <section aria-label="Coffee chats on the selected date" className="mt-6 min-w-0">
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                <h3 className="text-lg font-bold">{formatDate(selectedCalendarDay)}</h3>
+                <span className="text-xs text-gray-500">All times Pacific</span>
+              </div>
+              {selectedDayChats.length === 0 ? (
+                <div className="rounded-2xl border border-gray-200/80 bg-white p-5">
+                  <p className="text-sm text-gray-500">No confirmed coffee chats on this date.</p>
+                  <button type="button" onClick={() => router.push('/schedule')} className="mt-3 text-sm font-semibold underline underline-offset-4">
+                    Schedule a coffee chat
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {selectedDayChats.map(chat => (
+                    <button key={chat.id} type="button" onClick={() => setSelectedChat(chat)}
+                      className="flex w-full min-w-0 items-center gap-3 rounded-2xl border border-gray-200/80 bg-white p-4 text-left shadow-sm transition hover:border-gray-400 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500">
+                      <span aria-hidden="true" className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gray-50 text-xl">☕</span>
+                      <div className="min-w-0 flex-1 [overflow-wrap:anywhere]">
+                        <p className="font-semibold">{getChatName(chat)}</p>
+                        <p className="mt-1 text-sm text-gray-500">
+                          {formatTime(chat.start_time)}{chat.end_time ? ` – ${formatTime(chat.end_time)}` : ''}
+                        </p>
+                        {chat.location && <p className="mt-1 text-sm text-gray-500">{chat.location}</p>}
+                        {chat.status === 'completed' && <p className="mt-1 text-xs font-semibold text-gray-500">Completed</p>}
+                      </div>
+                      <span aria-hidden="true" className="shrink-0 text-gray-400">→</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+              <p className="mt-3 text-xs text-gray-500">Tap a coffee chat to view its details and actions.</p>
+            </section>
 
           </section>
 
