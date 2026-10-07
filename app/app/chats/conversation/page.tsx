@@ -7,6 +7,8 @@ import {
   useState,
 } from 'react'
 import { createPortal } from 'react-dom'
+import { Capacitor } from '@capacitor/core'
+import { Keyboard } from '@capacitor/keyboard'
 import {
   createClient,
 } from '@/lib/supabase/client'
@@ -233,6 +235,8 @@ export default function ConversationPage() {
   // AUTO-SCROLL REF
   // ============================================
 
+  const composerRef = useRef<HTMLInputElement | null>(null)
+  const keyboardFollowUntil = useRef(0)
   const messageScrollRef = useRef<HTMLDivElement | null>(null)
   const messageContentRef = useRef<HTMLDivElement | null>(null)
   const followMessagesRef = useRef(true)
@@ -573,6 +577,68 @@ export default function ConversationPage() {
     return () => { observer.disconnect(); cancelAnimationFrame(frame) }
   }, [loading, matchId])
 
+  useEffect(() => {
+    if (loading) return
+    let active = true
+    let frame = 0
+    let secondFrame = 0
+    const handles: Array<{ remove: () => Promise<void> }> = []
+    function followAfterResize(force = false) {
+      if (!active || document.activeElement !== composerRef.current) return
+      if (!force && !followMessagesRef.current && Date.now() >= keyboardFollowUntil.current) return
+      followMessagesRef.current = true
+      cancelAnimationFrame(frame)
+      cancelAnimationFrame(secondFrame)
+      frame = requestAnimationFrame(() => {
+        if (!active) return
+        scrollToBottom('auto')
+        secondFrame = requestAnimationFrame(() => { if (active) scrollToBottom('auto') })
+      })
+    }
+    const onResize = () => followAfterResize()
+    window.addEventListener('resize', onResize)
+    window.visualViewport?.addEventListener('resize', onResize)
+    async function listenToKeyboard() {
+      if (!Capacitor.isNativePlatform()) return
+      try {
+        for (const event of ['keyboardWillShow', 'keyboardDidShow'] as const) {
+          const onShow = () => {
+            if (!active || document.activeElement !== composerRef.current) return
+            keyboardFollowUntil.current = Date.now() + 800
+            followAfterResize(true)
+          }
+          const handle = event === 'keyboardWillShow'
+            ? await Keyboard.addListener('keyboardWillShow', onShow)
+            : await Keyboard.addListener('keyboardDidShow', onShow)
+          if (!active) { await handle.remove(); return }
+          handles.push(handle)
+        }
+      } catch (cause) { console.error('Chat keyboard listener failed:', cause) }
+    }
+    void listenToKeyboard()
+    return () => {
+      active = false
+      cancelAnimationFrame(frame)
+      cancelAnimationFrame(secondFrame)
+      window.removeEventListener('resize', onResize)
+      window.visualViewport?.removeEventListener('resize', onResize)
+      for (const handle of handles) void handle.remove()
+    }
+  }, [loading, matchId])
+
+  // Keep the latest bubble visible while the composer and iOS viewport settle.
+  useEffect(() => {
+    if (loading || sending || document.activeElement !== composerRef.current ||
+        Date.now() >= keyboardFollowUntil.current) return
+    let frame = 0
+    const timers = [0, 100, 300, 600].map(delay => setTimeout(() => {
+      if (document.activeElement !== composerRef.current || !followMessagesRef.current) return
+      cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(() => scrollToBottom('auto'))
+    }, delay))
+    return () => { timers.forEach(clearTimeout); cancelAnimationFrame(frame) }
+  }, [sending, loading, messages, matchId])
+
   // ============================================
   // REALTIME MESSAGE LISTENER
   // ============================================
@@ -846,8 +912,8 @@ export default function ConversationPage() {
   ) {
     event.preventDefault()
 
-    const trimmedMessage =
-      newMessage.trim()
+    const sentDraft = newMessage
+    const trimmedMessage = sentDraft.trim()
 
     if (
       !trimmedMessage ||
@@ -958,6 +1024,7 @@ export default function ConversationPage() {
     }
 
     followMessagesRef.current = true
+    keyboardFollowUntil.current = Date.now() + 1200
 
     setMessages(
       (currentMessages) => {
@@ -979,11 +1046,11 @@ export default function ConversationPage() {
       }
     )
 
-    setNewMessage('')
+    setNewMessage(current => current === sentDraft ? '' : current)
     setSending(false)
 
     setTimeout(() => {
-      scrollToBottom('smooth')
+      scrollToBottom('auto')
     }, 50)
   }
 
@@ -1212,7 +1279,7 @@ export default function ConversationPage() {
         className="min-h-0 flex-1 overflow-y-auto overscroll-y-contain"
         onScroll={() => {
           const container = messageScrollRef.current
-          if (container) followMessagesRef.current =
+          if (container && Date.now() >= keyboardFollowUntil.current) followMessagesRef.current =
             container.scrollHeight - container.scrollTop - container.clientHeight < 100
         }}
       >
@@ -1595,7 +1662,12 @@ export default function ConversationPage() {
         >
 
           <input
+            ref={composerRef}
             type="text"
+            onFocus={() => {
+              keyboardFollowUntil.current = Date.now() + 800
+              scrollToBottom('auto')
+            }}
             value={newMessage}
             onChange={(event) =>
               setNewMessage(
@@ -1603,12 +1675,21 @@ export default function ConversationPage() {
               )
             }
             placeholder={`Message ${firstName}...`}
-            disabled={sending}
             className="block w-full min-w-0 rounded-2xl border border-gray-200 bg-gray-50 px-3 py-3 text-base outline-none transition placeholder:text-gray-400 focus:border-gray-400 focus:bg-white"
           />
 
           <button
             type="submit"
+            onClick={() => {
+              keyboardFollowUntil.current = Date.now() + 1200
+              followMessagesRef.current = true
+              composerRef.current?.focus({ preventScroll: true })
+            }}
+            onPointerDown={event => {
+              // Keep the focused composer and iOS keyboard open when tapping Send.
+              event.preventDefault()
+              composerRef.current?.focus({ preventScroll: true })
+            }}
             disabled={
               sending ||
               !newMessage.trim()

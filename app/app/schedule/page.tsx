@@ -1308,19 +1308,22 @@ function SchedulePageContent() {
                     <label htmlFor="coffee-date" className="block text-sm font-semibold">Date</label>
                     <input id="coffee-date" type="date" required min={pacificToday()} value={proposedDate}
                       onChange={event => setProposedDate(event.target.value)}
-                      className="mt-2 block w-full min-w-0 rounded-xl border border-gray-200 bg-white px-3 py-3 text-base" />
+                      className="mt-2 block h-12 w-full min-w-0 max-w-full appearance-none rounded-xl border border-gray-200 bg-white px-3 text-base [&::-webkit-date-and-time-value]:text-left [&::-webkit-datetime-edit]:min-w-0 [&::-webkit-datetime-edit]:p-0"
+                      style={{ boxSizing: 'border-box', width: '100%', minWidth: 0, maxWidth: '100%', height: 48, WebkitAppearance: 'none' }} />
                   </div>
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_minmax(0,1fr)] items-start gap-3">
                     <div className="min-w-0">
                       <label htmlFor="coffee-time" className="block text-sm font-semibold">Start time</label>
                       <input id="coffee-time" type="time" required value={proposedStart}
                         onChange={event => setProposedStart(event.target.value)}
-                        className="mt-2 block w-full min-w-0 rounded-xl border border-gray-200 bg-white px-3 py-3 text-base" />
+                        className="mt-2 block h-12 w-full min-w-0 max-w-full appearance-none rounded-xl border border-gray-200 bg-white px-3 text-base [&::-webkit-date-and-time-value]:text-left [&::-webkit-datetime-edit]:min-w-0 [&::-webkit-datetime-edit]:p-0"
+                      style={{ boxSizing: 'border-box', width: '100%', minWidth: 0, maxWidth: '100%', height: 48, WebkitAppearance: 'none' }} />
                     </div>
                     <div className="min-w-0">
                       <label htmlFor="coffee-duration" className="block text-sm font-semibold">Duration</label>
                       <select id="coffee-duration" value={duration} onChange={event => setDuration(Number(event.target.value))}
-                        className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-3 py-3 text-base">
+                        className="mt-2 block h-12 w-full min-w-0 max-w-full rounded-xl border border-gray-200 bg-white px-3 text-base"
+                        style={{ boxSizing: 'border-box', width: '100%', minWidth: 0, maxWidth: '100%', height: 48 }}>
                         {[15, 30, 45, 60].map(minutes => <option key={minutes} value={minutes}>{minutes} minutes</option>)}
                       </select>
                     </div>
